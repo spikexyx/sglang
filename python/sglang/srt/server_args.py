@@ -159,9 +159,15 @@ class ServerArgs:
     enable_eplb: bool = False
     eplb_algorithm: str = "auto"
     eplb_rebalance_num_iterations: int = 1000
+    eplb_window_size: int = 1000
+    eplb_priority_window_size: int = 200
+    eplb_middle_window_weight: float = 0.8
+    eplb_last_window_weight: float = 0.2
+    eplb_window_decay_mode: str = "none"
+    eplb_rebalance_threshold: float = 0.8
     eplb_rebalance_layers_per_chunk: Optional[int] = None
     expert_distribution_recorder_mode: Optional[
-        Literal["stat", "stat_approx", "per_pass", "per_token"]
+        Literal["stat", "stat_approx", "per_pass", "per_token", "historical", "historical_stat", "historical_dynamic"]
     ] = None
     expert_distribution_recorder_buffer_size: Optional[int] = None
     enable_expert_distribution_metrics: bool = False
@@ -543,6 +549,22 @@ class ServerArgs:
 
         if self.custom_weight_loader is None:
             self.custom_weight_loader = []
+
+        # EPLB sliding window mode size check
+        if self.enable_eplb and self.expert_distribution_recorder_mode in ["historical"]:
+            assert self.eplb_window_size > 0, "EPLB window size must be greater than 0"
+            assert self.eplb_priority_window_size > 0, "EPLB priority window size must be greater than 0"
+            assert self.eplb_window_size >= self.eplb_rebalance_num_iterations, (
+                f"EPLB window size ({self.eplb_window_size}) must be greater than or equal to "
+                f"rebalance number iterations ({self.eplb_rebalance_num_iterations})"
+            )
+            assert self.eplb_priority_window_size <= self.eplb_rebalance_num_iterations, (
+                f"EPLB priority window size ({self.eplb_priority_window_size}) must be less than or equal to "
+                f"rebalance number iterations ({self.eplb_rebalance_num_iterations})"
+            )
+            assert self.eplb_middle_window_weight <= 1.0 and self.eplb_middle_window_weight >= 0.0, "EPLB window weight 1 must be in [0, 1]"
+            assert self.eplb_last_window_weight <= 1.0 and self.eplb_last_window_weight >= 0.0, "EPLB window weight 2 must be in [0, 1]"
+
 
     def validate_disagg_tp_size(self, prefill_tp: int, decode_tp: int):
         larger_tp = max(decode_tp, prefill_tp)
@@ -1588,6 +1610,44 @@ class ServerArgs:
             nargs="*",
             default=None,
             help="The custom dataloader which used to update the model. Should be set with a valid import path, such as my_package.weight_load_func",
+        )
+        
+        # EPLB sliding window args
+        parser.add_argument(
+            "--eplb-window-size",
+            type=int,
+            default=ServerArgs.eplb_window_size,
+            help="Total size of the sliding window for EPLB re-balance.",
+        )
+        parser.add_argument(
+            "--eplb-priority-window-size",
+            type=int,
+            default=ServerArgs.eplb_priority_window_size,
+            help="Priority window size in sliding window mode for EPLB re-balance.",
+        )
+        parser.add_argument(
+            "--eplb-middle-window-weight",
+            type=float,
+            default=ServerArgs.eplb_middle_window_weight,
+            help="Weight for the middle part of the sliding window for EPLB re-balance.",
+        )
+        parser.add_argument(
+            "--eplb-last-window-weight",
+            type=float,
+            default=ServerArgs.eplb_last_window_weight,
+            help="Weight for the last part of the sliding window for EPLB re-balance.",
+        )
+        parser.add_argument(
+            "--eplb-window-decay-mode",
+            type=str,
+            default=ServerArgs.eplb_window_decay_mode,
+            help="Decay mode in sliding window for EPLB re-balance, 'exp' for exponential decay, 'linear' for linear decay, 'none' for no decay.",
+        )
+        parser.add_argument(
+            "--eplb-rebalance-threshold",
+            type=float,
+            default=ServerArgs.eplb_rebalance_threshold,
+            help="Balancedness threshold for triggering EPLB re-balance in sliding window mode.",
         )
 
     @classmethod

@@ -61,6 +61,14 @@ class EPLBManager:
     def rebalance(self):
         logger.info("[EPLBManager] rebalance start")
 
+        # If recorder mode is historical_dynamic, and ep balancedness still sufficient, skip rebalancing.
+        if self._server_args.expert_distribution_recorder_mode == "historical_dynamic":
+            if get_global_expert_distribution_recorder().get_balancedness() >= self._server_args.eplb_rebalance_threshold:
+                logger.info(
+                    "[EPLBManager] rebalance skipped, balancedness is sufficient."
+                )
+                return
+
         enable_timing = self._rebalance_layers_per_chunk is None
 
         if enable_timing:
