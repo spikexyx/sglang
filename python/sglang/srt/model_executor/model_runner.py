@@ -120,6 +120,14 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
 
 logger = logging.getLogger(__name__)
 
+# 添加控制台 方便调试输出
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
 
 class RankZeroFilter(logging.Filter):
     """Filter that only allows INFO level logs from rank 0, but allows all other levels from any rank."""
@@ -847,6 +855,12 @@ class ModelRunner:
         max_num_reqs: Optional[int] = None,
         max_total_tokens: Optional[int] = None,
     ):
+        # for debug
+        logger.info(
+            f"Memory pool begin. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
+
         if self.server_args.kv_cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
@@ -921,6 +935,11 @@ class ModelRunner:
                 "Not enough memory. Please try to increase --mem-fraction-static."
             )
 
+        logger.info(
+            f"Before Req to token pool. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
+
         if self.req_to_token_pool is None:
             if self.server_args.disaggregation_mode == "decode":
                 from sglang.srt.disaggregation.decode import DecodeReqToTokenPool
@@ -946,7 +965,17 @@ class ModelRunner:
             # Draft worker shares req_to_token_pool with the target worker.
             assert self.is_draft_worker
 
+        logger.info(
+            f"After Req to token pool. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
+        logger.info(
+            f"Before token to kv pool. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
+
         if self.use_mla_backend:
+            logger.info(f"Using MLA backend for token to kv pool.")
             self.token_to_kv_pool = MLATokenToKVPool(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
@@ -964,6 +993,7 @@ class ModelRunner:
                 end_layer=self.end_layer,
             )
         elif self.server_args.enable_double_sparsity:
+            logger.info(f"Using DoubleSparse backend for token to kv pool.")
             self.token_to_kv_pool = DoubleSparseTokenToKVPool(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
@@ -978,6 +1008,7 @@ class ModelRunner:
                 end_layer=self.end_layer,
             )
         else:
+            logger.info(f"Using MHA backend for token to kv pool.")
             self.token_to_kv_pool = MHATokenToKVPool(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
@@ -990,6 +1021,15 @@ class ModelRunner:
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
             )
+
+        logger.info(
+            f"After token to kv pool. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
+        logger.info(
+            f"Before pool allocator. "
+            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+        )
 
         if self.token_to_kv_pool_allocator is None:
             if self.page_size == 1:
