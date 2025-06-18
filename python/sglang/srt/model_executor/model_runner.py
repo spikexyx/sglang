@@ -191,6 +191,10 @@ class ModelRunner:
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
 
+        # For weight hook
+        self.weight_infos = {}
+        self.total_weight_dict = {}
+
         self.forward_pass_id = 0
 
         # Model-specific adjustment
@@ -519,6 +523,87 @@ class ModelRunner:
             f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
         )
         return min_per_gpu_memory
+    
+    # Weights_hook function 
+    def _register_weight_hooks(self):
+        self.weight_infos = {}  # Save weight metadatas
+        
+        def tensor_hook(tensor: torch.Tensor, name: str):
+            if tensor.is_cuda:
+                self.weight_infos[name] = {
+                    "ptr": tensor.data_ptr(),
+                    "size": tensor.numel() * tensor.element_size(),
+                    # "actual_size": tensor.storage().size() * tensor.element_size(),
+                    "device": str(tensor.device),
+                    "dtype": str(tensor.dtype),
+                    "shape": list(tensor.shape)
+                }
+        
+        # Register hooks to capture the initial state of model weights
+        for name, param in self.model.named_parameters():
+            tensor_hook(param, name)  # Capture parameter weights
+        self._save_weight_meta()  # Save weight metadata to a local file
+        self.total_weight_dict = self._calculate_device_weight_sizes(unit="GB")
+        self._save_total_weight_meta()
+        # self._merge_weights()  # Merge weights based on pointer continuity
+        # self._save_merged_weight_meta()  # Save merged weight metadata to a local file
+
+    # Save the model weight metadata to a JSON file
+    def _save_weight_meta(self):
+        os.makedirs("weights_metadata", exist_ok=True)
+        meta_path = os.path.join("weights_metadata", f"weights_meta_{self.gpu_id}.json")
+        # meta_path = f"weights_meta_{self.gpu_id}.json"
+        try:
+            with open(meta_path, 'w') as f:
+                json.dump(self.weight_infos, f, indent=2)
+            logger.info(f"Save weight metadata to {meta_path}.")
+        except IOError as e:
+            logger.error(f"Failed to save weight metadata to {meta_path}: {e}")
+            raise
+
+    def _save_total_weight_meta(self):
+        os.makedirs("weights_metadata", exist_ok=True)
+        meta_path = os.path.join("weights_metadata", f"total_weight_meta_{self.gpu_id}.json")
+        # meta_path = f"weights_meta_{self.gpu_id}.json"
+        try:
+            with open(meta_path, 'w') as f:
+                json.dump(self.total_weight_dict, f, indent=2)
+            logger.info(f"Save total weight metadata to {meta_path}.")
+        except IOError as e:
+            logger.error(f"Failed to save total weight metadata to {meta_path}: {e}")
+            raise
+        
+    def _calculate_device_weight_sizes(self, unit: str = "bytes") -> dict:
+        """Calculate the total size of weights per device in self.weight_infos.
+        
+        Args:
+            unit (str): The unit to return the size in. 
+                       Options: "bytes", "KB", "MB", "GB".
+        
+        Returns:
+            dict: {device: total_size} where total_size is in the specified unit.
+        """
+        device_sizes = {}  # {device: total_size_in_bytes}
+        
+        # 遍历所有 weight_infos，按 device 累加 size
+        for info in self.weight_infos.values():
+            device = info["device"]
+            size = info["size"]
+            if device in device_sizes:
+                device_sizes[device] += size
+            else:
+                device_sizes[device] = size
+        
+        # 单位转换
+        unit = unit.upper()
+        if unit == "KB":
+            return {device: size / 1024 for device, size in device_sizes.items()}
+        elif unit == "MB":
+            return {device: size / (1024 ** 2) for device, size in device_sizes.items()}
+        elif unit == "GB":
+            return {device: size / (1024 ** 3) for device, size in device_sizes.items()}
+        else:  # Default to bytes
+            return device_sizes
 
     def load_model(self):
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
@@ -593,6 +678,9 @@ class ModelRunner:
             else None
         )
         self.dtype = self.model_config.dtype
+
+        # Add weight hook to get model weights information
+        self._register_weight_hooks()
 
         after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
