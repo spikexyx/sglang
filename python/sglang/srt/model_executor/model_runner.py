@@ -559,10 +559,10 @@ class ModelRunner:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
                 # delete lock file
-                lock_file = os.path.join("weights_metadata", f"weight_update_{self.gpu_id}.lock")
+                lock_file = os.path.join("weights_metadata", f"weight_saving_{self.gpu_id}.lock")
                 if os.path.exists(lock_file):
                     os.remove(lock_file)
-                logger.info(f"Released weight update lock for GPU {self.gpu_id}")
+                logger.info(f"Released weight saving lock for GPU {self.gpu_id}")
             except Exception as e:
                 logger.warning(f"Error releasing weight lock: {e}")
             finally:
