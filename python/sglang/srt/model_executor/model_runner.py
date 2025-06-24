@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import fcntl
+
 import torch
 import torch.distributed as dist
 
@@ -265,7 +267,9 @@ class ModelRunner:
 
         # Load the model
         self.sampler = Sampler()
-        self.load_model()
+
+        with torch.cuda.nvtx.range("TARGET_MODELRUNNER_LOAD_MODEL"):
+            self.load_model()
 
         self.start_layer = getattr(self.model, "start_layer", 0)
         self.end_layer = getattr(
@@ -524,6 +528,46 @@ class ModelRunner:
         )
         return min_per_gpu_memory
     
+    def _acquire_weight_lock(self, timeout=10):
+        """acquire weight metadata saving file lock"""
+        os.makedirs("weights_metadata", exist_ok=True)
+        lock_file = os.path.join("weights_metadata", f"weight_saving_{self.gpu_id}.lock")
+        
+        try:
+            self._lock_fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY)
+            start_time = time.time()
+            
+            while True:
+                try:
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    logger.info(f"Acquired weight saving lock for GPU {self.gpu_id}")
+                    return True
+                except IOError:
+                    if time.time() - start_time > timeout:
+                        logger.error(f"Failed to acquire weight lock within {timeout} seconds")
+                        os.close(self._lock_fd)
+                        return False
+                    time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Error acquiring weight lock: {e}")
+            return False
+
+    def _release_weight_lock(self):
+        """release weight metadata saving file lock"""
+        if hasattr(self, '_lock_fd'):
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+                # delete lock file
+                lock_file = os.path.join("weights_metadata", f"weight_update_{self.gpu_id}.lock")
+                if os.path.exists(lock_file):
+                    os.remove(lock_file)
+                logger.info(f"Released weight update lock for GPU {self.gpu_id}")
+            except Exception as e:
+                logger.warning(f"Error releasing weight lock: {e}")
+            finally:
+                delattr(self, '_lock_fd')
+
     # Weights_hook function 
     def _register_weight_hooks(self):
         self.weight_infos = {}  # Save weight metadatas
@@ -538,7 +582,10 @@ class ModelRunner:
                     "dtype": str(tensor.dtype),
                     "shape": list(tensor.shape)
                 }
-        
+
+        if not self._acquire_weight_lock():
+            raise RuntimeError("Failed to acquire weight metadata update lock")
+    
         # Register hooks to capture the initial state of model weights
         for name, param in self.model.named_parameters():
             tensor_hook(param, name)  # Capture parameter weights
@@ -547,6 +594,7 @@ class ModelRunner:
         self._save_total_weight_meta()
         # self._merge_weights()  # Merge weights based on pointer continuity
         # self._save_merged_weight_meta()  # Save merged weight metadata to a local file
+        self._release_weight_lock
 
     # Save the model weight metadata to a JSON file
     def _save_weight_meta(self):
@@ -716,6 +764,177 @@ class ModelRunner:
             rank=self.tp_rank,
         )
 
+    # Functions for recording weight metadata during inference when update model weights
+    def _handle_weight_update_hooks(self):
+        """
+        Handle weight updates during inference - clean old data and capture new weight information
+        """
+        logger.info("Starting weight update hook processing...")
+        if not self._acquire_weight_lock():
+            raise RuntimeError("Failed to acquire weight metadata update lock")
+        
+        # Clear old weight information
+        self._clear_old_weight_data()
+        
+        # Re-register hooks to capture updated weights
+        self._register_updated_weight_hooks()
+        
+        # Save updated metadata
+        self._save_updated_weight_metadata()
+
+        self._release_weight_lock()
+        
+        logger.info("Weight update hook processing completed.")
+
+    def _clear_old_weight_data(self):
+        """
+        Clear old weight information and metadata files
+        """
+        # Clear in-memory data
+        if hasattr(self, 'weight_infos'):
+            self.weight_infos.clear()
+        else:
+            self.weight_infos = {}
+        
+        if hasattr(self, 'total_weight_dict'):
+            self.total_weight_dict.clear()
+        else:
+            self.total_weight_dict = {}
+        
+        # Remove old metadata files
+        try:
+            weights_dir = "weights_metadata"
+            if os.path.exists(weights_dir):
+                old_weight_file = os.path.join(weights_dir, f"weights_meta_{self.gpu_id}.json")
+                old_total_file = os.path.join(weights_dir, f"total_weight_meta_{self.gpu_id}.json")
+                
+                if os.path.exists(old_weight_file):
+                    os.remove(old_weight_file)
+                    logger.info(f"Removed old weight metadata file: {old_weight_file}")
+                
+                if os.path.exists(old_total_file):
+                    os.remove(old_total_file)
+                    logger.info(f"Removed old total weight metadata file: {old_total_file}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to clean old metadata files: {e}")
+
+    def _register_updated_weight_hooks(self):
+        """
+        Register hooks for updated model weights (similar to _register_weight_hooks but for updates)
+        """
+        def tensor_hook(tensor: torch.Tensor, name: str):
+            if tensor.is_cuda:
+                self.weight_infos[name] = {
+                    "ptr": tensor.data_ptr(),
+                    "size": tensor.numel() * tensor.element_size(),
+                    "device": str(tensor.device),
+                    "dtype": str(tensor.dtype),
+                    "shape": list(tensor.shape),
+                    "updated": True  # Mark as updated weight
+                }
+        
+        # Capture updated model weights
+        # logger.info("Capturing updated model weights...")
+        # weight_count = 0
+        for name, param in self.model.named_parameters():
+            tensor_hook(param, name)
+            # weight_count += 1
+        
+        # logger.info(f"Captured {weight_count} updated weight tensors")
+        
+        # Calculate device weight sizes for updated weights
+        self.total_weight_dict = self._calculate_device_weight_sizes(unit="GB")
+
+    def _save_updated_weight_metadata(self):
+        """
+        Save updated weight metadata to JSON files
+        """
+        try:
+            # Save individual weight metadata
+            self._save_weight_meta()
+            
+            # Save total weight metadata
+            self._save_total_weight_meta()
+            
+            # Additionally save update timestamp and summary
+            self._save_weight_update_summary()
+            
+        except Exception as e:
+            logger.error(f"Failed to save updated weight metadata: {e}")
+            raise
+
+    def _save_weight_update_summary(self):
+        """
+        Save a summary of the weight update operation
+        """
+        import time
+        
+        summary = {
+            "update_timestamp": time.time(),
+            "update_time_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "gpu_id": self.gpu_id,
+            "total_weights": len(self.weight_infos),
+            "total_devices": len(self.total_weight_dict),
+            "device_weight_summary": self.total_weight_dict,
+            "memory_usage_gb": sum(self.total_weight_dict.values()) if self.total_weight_dict else 0
+        }
+        
+        os.makedirs("weights_metadata", exist_ok=True)
+        summary_path = os.path.join("weights_metadata", f"weight_update_summary_{self.gpu_id}.json")
+        
+        try:
+            with open(summary_path, 'w') as f:
+                json.dump(summary, f, indent=2)
+            logger.info(f"Saved weight update summary to {summary_path}")
+        except IOError as e:
+            logger.error(f"Failed to save weight update summary to {summary_path}: {e}")
+
+    def _validate_weight_update(self):
+        """
+        Validate that weight update was successful by checking if weights have new pointers
+        """
+        if not self.weight_infos:
+            logger.warning("No weight information found after update")
+            return False
+        
+        # Check if we have the expected number of weights
+        expected_weight_count = sum(1 for _ in self.model.named_parameters())
+        actual_weight_count = len(self.weight_infos)
+        
+        if actual_weight_count != expected_weight_count:
+            logger.warning(f"Weight count mismatch: expected {expected_weight_count}, got {actual_weight_count}")
+            return False
+        
+        # Check if all weights are marked as CUDA tensors
+        cuda_weights = sum(1 for info in self.weight_infos.values() if "cuda" in info["device"])
+        if cuda_weights == 0:
+            logger.warning("No CUDA weights found after update")
+            return False
+        
+        logger.info(f"Weight update validation passed: {actual_weight_count} weights, {cuda_weights} on CUDA")
+        return True
+
+    # Entry hook for updating weights metadata
+    def update_weights_metadata(self):
+        """
+        Public interface to update weight metadata
+        """
+        try:
+            self._handle_weight_update_hooks()
+            
+            # Validate the update
+            if self._validate_weight_update():
+                logger.info("Weight metadata update completed successfully")
+                return True
+            else:
+                logger.error("Weight metadata update validation failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Weight metadata update failed: {e}")
+            return False
+
     def update_weights_from_disk(
         self, model_path: str, load_format: str
     ) -> tuple[bool, str]:
@@ -767,6 +986,8 @@ class ModelRunner:
         self.server_args.model_path = model_path
         self.server_args.load_format = load_format
         self.load_config = load_config
+
+        self.update_weights_metadata()
 
         logger.info("Update weights end.")
         return True, "Succeeded to update model weights."
@@ -867,6 +1088,8 @@ class ModelRunner:
             self.model.load_weights(named_tensors)
         else:
             raise NotImplementedError(f"Unknown load_format={load_format}")
+        
+        self.update_weights_metadata()
         return True, "Success"
 
     def get_weights_by_name(
