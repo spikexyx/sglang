@@ -594,7 +594,7 @@ class ModelRunner:
         self._save_total_weight_meta()
         # self._merge_weights()  # Merge weights based on pointer continuity
         # self._save_merged_weight_meta()  # Save merged weight metadata to a local file
-        self._release_weight_lock
+        self._release_weight_lock()
 
     # Save the model weight metadata to a JSON file
     def _save_weight_meta(self):
