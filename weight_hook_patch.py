@@ -397,13 +397,10 @@ def patched_run_scheduler_process(
 
     import sglang.srt.managers.scheduler as scheduler_module
 
-    if hasattr(scheduler_module, '_original_run_scheduler_process'):
-        print(f"[PATCH] Now calling original run_scheduler_process")
-        scheduler_module._original_run_scheduler_process(
-            server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
-        )
-    else:
-        print("[PATCH] No original run_scheduler_process found, skipping.")
+    assert hasattr(scheduler_module, '_original_run_scheduler_process')
+    scheduler_module._original_run_scheduler_process(        
+        server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
+    )
 
 def patched_run_data_parallel_controller_process(
         server_args: ServerArgs,
@@ -415,11 +412,8 @@ def patched_run_data_parallel_controller_process(
 
     import sglang.srt.managers.data_parallel_controller as dp_controller_module
 
-    if hasattr(dp_controller_module, '_original_run_data_parallel_controller_process'):
-        print(f"[PATCH] Now calling original run_data_parallel_controller_process")
-        dp_controller_module._original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
-    else:
-        print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
+    assert hasattr(dp_controller_module, '_original_run_data_parallel_controller_process')
+    dp_controller_module._original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
 
 # ===================================================================
 def apply_entrypoint_patches():
@@ -430,17 +424,27 @@ def apply_entrypoint_patches():
         import sglang.srt.managers.scheduler as scheduler_module
         import sglang.srt.managers.data_parallel_controller as dp_controller_module
 
-        if hasattr(scheduler_module, '_original_run_scheduler_process') and hasattr(dp_controller_module, '_original_run_data_parallel_controller_process'):
-            print("[PATCH] run_scheduler_process and run_data_parallel_controller_process already patched, skipping.")
-            print("[PATCH] run_scheduler_process already patched, skipping.")
-            return
+        if not hasattr(scheduler_module, '_original_run_scheduler_process'):
+            scheduler_module._original_run_scheduler_process = scheduler_module.run_scheduler_process
+
+        scheduler_module.run_scheduler_process = patched_run_scheduler_process
+
+        if not hasattr(dp_controller_module, '_original_run_data_parallel_controller_process'):
+            dp_controller_module._original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
+
+        dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
+
+        # if hasattr(scheduler_module, '_original_run_scheduler_process') and hasattr(dp_controller_module, '_original_run_data_parallel_controller_process'):
+        #     print("[PATCH] run_scheduler_process and run_data_parallel_controller_process already patched, skipping.")
+        #     print("[PATCH] run_scheduler_process already patched, skipping.")
+        #     return
         
-        scheduler_module._original_run_scheduler_process = scheduler_module.run_scheduler_process
-        dp_controller_module._original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
+        # scheduler_module._original_run_scheduler_process = scheduler_module.run_scheduler_process
+        # dp_controller_module._original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
 
         # Patch the functions
-        scheduler_module.run_scheduler_process = patched_run_scheduler_process
-        dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
+        # scheduler_module.run_scheduler_process = patched_run_scheduler_process
+        # dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
 
     except Exception as e:
         print(f"[PATCH] Failed to import necessary modules for entrypoint patching: {e}")
