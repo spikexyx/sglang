@@ -405,13 +405,6 @@ def patched_run_scheduler_process(
     else:
         print("[PATCH] No original run_scheduler_process found, skipping.")
 
-    # if original_run_scheduler_process:
-    #     original_run_scheduler_process(
-    #         server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
-    #     )
-    # else:
-    #     print("[PATCH] No original run_scheduler_process found, skipping.")
-
 def patched_run_data_parallel_controller_process(
         server_args: ServerArgs,
         port_args: PortArgs,
@@ -428,20 +421,12 @@ def patched_run_data_parallel_controller_process(
     else:
         print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
 
-    # if original_run_data_parallel_controller_process:
-    #     original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
-    # else:
-    #     print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
-    
-
 # ===================================================================
 def apply_entrypoint_patches():
     print(f"[PATCH] Applying entrypoint patches for SGLang server in {os.getpid()} ...")
     global original_run_scheduler_process, original_run_data_parallel_controller_process
 
     try:
-        # from sglang.srt.managers.scheduler import run_scheduler_process
-        # from sglang.srt.managers.data_parallel_controller import run_data_parallel_controller_process
         import sglang.srt.managers.scheduler as scheduler_module
         import sglang.srt.managers.data_parallel_controller as dp_controller_module
 
@@ -450,11 +435,9 @@ def apply_entrypoint_patches():
             print("[PATCH] run_scheduler_process already patched, skipping.")
             return
         
+        scheduler_module._original_run_scheduler_process = scheduler_module.run_scheduler_process
+        dp_controller_module._original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
 
-        original_run_scheduler_process = scheduler_module.run_scheduler_process
-        original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
-
-        
         # Patch the functions
         scheduler_module.run_scheduler_process = patched_run_scheduler_process
         dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
@@ -462,47 +445,3 @@ def apply_entrypoint_patches():
     except Exception as e:
         print(f"[PATCH] Failed to import necessary modules for entrypoint patching: {e}")
         raise
-
-# ===================================================================
-# Patch the load_model method to handle weight metadata loading
-# original_load_model = model_runner_module.ModelRunner.load_model
-
-# def patched_load_model(self):
-#     print("[PATCH] Patching ModelRunner.load_model to handle weight metadata loading")
-#     original_load_model(self)
-#     # Register hooks after model is loaded
-#     self._register_weight_hooks()  
-
-# ===================================================================
-# Patch the update_weights_from_disk method to handle update weight
-# original_update_weights_from_disk = model_runner_module.ModelRunner.update_weights_from_disk
-
-# def patched_update_weights_from_disk(
-#         self, model_path: str, load_format: str
-#     ) -> tuple[bool, str]:
-#     print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
-#     result = original_update_weights_from_disk(self, model_path, load_format)
-#     # Register hooks after weights are updated
-#     self.update_weights_metadata()
-#     return result
-
-# ===================================================================
-# Patch the update_weights_from_tensor method to handle update weight
-# original_update_weights_from_tensor = model_runner_module.ModelRunner.update_weights_from_tensor
-
-# def patched_update_weights_from_tensor(
-#         self,
-#         named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
-#         load_format: Optional[str] = None,
-#     ):
-#     print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
-#     result = original_update_weights_from_tensor(self, named_tensors, load_format)
-#     # Register hooks after weights are updated
-#     self.update_weights_metadata()
-#     return result
-
-# ===================================================================
-# Apply the patches to the ModelRunner class
-# model_runner_module.ModelRunner.load_model = patched_load_model
-# model_runner_module.ModelRunner.update_weights_from_disk = patched_update_weights_from_disk
-# model_runner_module.ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
