@@ -430,15 +430,17 @@ def apply_entrypoint_patches():
     global original_run_scheduler_process, original_run_data_parallel_controller_process
 
     try:
-        from sglang.srt.managers.scheduler import run_scheduler_process
-        from sglang.srt.managers.data_parallel_controller import run_data_parallel_controller_process
+        # from sglang.srt.managers.scheduler import run_scheduler_process
+        # from sglang.srt.managers.data_parallel_controller import run_data_parallel_controller_process
+        import sglang.srt.managers.scheduler as scheduler_module
+        import sglang.srt.managers.data_parallel_controller as dp_controller_module
 
-        original_run_scheduler_process = run_scheduler_process
-        original_run_data_parallel_controller_process = run_data_parallel_controller_process
+        original_run_scheduler_process = scheduler_module.run_scheduler_process
+        original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
 
         # Patch the functions
-        run_scheduler_process = patched_run_scheduler_process
-        run_data_parallel_controller_process = patched_run_data_parallel_controller_process
+        scheduler_module.run_scheduler_process = patched_run_scheduler_process
+        dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
 
     except Exception as e:
         print(f"[PATCH] Failed to import necessary modules for entrypoint patching: {e}")
