@@ -11,6 +11,10 @@ import runpy
 import json
 import time
 import torch
+from typing import List, Tuple, Union, Optional
+
+from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args import PortArgs
 
 print(f"[WRAPPER] Preparing to patch the scheduler process in {os.getpid()}...")
 
