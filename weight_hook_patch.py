@@ -389,41 +389,6 @@ def apply_model_runner_patches():
 # Patch the run_scheduler_process and run_data_parallel_controller_process functions (subprocesses)
 from sglang.srt.server_args import ServerArgs, PortArgs
 
-original_run_scheduler_process = None
-original_run_data_parallel_controller_process = None
-
-def patched_run_scheduler_process(
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        gpu_id: int,
-        tp_rank: int,
-        pp_rank: int,
-        dp_rank: Optional[int],
-        pipe_writer,
-    ):
-    print(f"[PATCH] Patching run_scheduler_process for GPU {gpu_id}, TP rank {tp_rank}, PP rank {pp_rank}, DP rank {dp_rank} in process {os.getpid()} ...")
-    apply_model_runner_patches()
-
-    if original_run_scheduler_process:
-        original_run_scheduler_process(
-            server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
-        )
-    else:
-        print("[PATCH] No original run_scheduler_process found, skipping.")
-
-def patched_run_data_parallel_controller_process(
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        pipe_writer,
-    ):
-    print(f"[PATCH] Patching run_data_parallel_controller_process in process {os.getpid()} ...")
-    apply_model_runner_patches()
-
-    if original_run_data_parallel_controller_process:
-        original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
-    else:
-        print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
-    
 # ===================================================================
 def apply_entrypoint_patches():
     print(f"[PATCH] Applying entrypoint patches for SGLang server in {os.getpid()} ...")
@@ -438,6 +403,38 @@ def apply_entrypoint_patches():
         original_run_scheduler_process = scheduler_module.run_scheduler_process
         original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
 
+        def patched_run_scheduler_process(
+                server_args: ServerArgs,
+                port_args: PortArgs,
+                gpu_id: int,
+                tp_rank: int,
+                pp_rank: int,
+                dp_rank: Optional[int],
+                pipe_writer,
+            ):
+            print(f"[PATCH] Patching run_scheduler_process for GPU {gpu_id}, TP rank {tp_rank}, PP rank {pp_rank}, DP rank {dp_rank} in process {os.getpid()} ...")
+            apply_model_runner_patches()
+
+            if original_run_scheduler_process:
+                original_run_scheduler_process(
+                    server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
+                )
+            else:
+                print("[PATCH] No original run_scheduler_process found, skipping.")
+
+        def patched_run_data_parallel_controller_process(
+                server_args: ServerArgs,
+                port_args: PortArgs,
+                pipe_writer,
+            ):
+            print(f"[PATCH] Patching run_data_parallel_controller_process in process {os.getpid()} ...")
+            apply_model_runner_patches()
+
+            if original_run_data_parallel_controller_process:
+                original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
+            else:
+                print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
+    
         # Patch the functions
         scheduler_module.run_scheduler_process = patched_run_scheduler_process
         dp_controller_module.run_data_parallel_controller_process = patched_run_data_parallel_controller_process
