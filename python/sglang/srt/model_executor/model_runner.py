@@ -570,7 +570,8 @@ class ModelRunner:
 
     # Weights_hook function 
     def _register_weight_hooks(self):
-        self.weight_infos = {}  # Save weight metadatas
+        # self.weight_infos = {}  # Save weight metadatas
+        self._clear_old_weight_data()
         
         def tensor_hook(tensor: torch.Tensor, name: str):
             if tensor.is_cuda:
