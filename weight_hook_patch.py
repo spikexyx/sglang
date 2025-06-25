@@ -397,6 +397,9 @@ def patched_run_scheduler_process(
 
     import sglang.srt.managers.scheduler as scheduler_module
 
+    if not hasattr(scheduler_module, '_original_run_scheduler_process'):
+            scheduler_module._original_run_scheduler_process = scheduler_module.run_scheduler_process
+
     assert hasattr(scheduler_module, '_original_run_scheduler_process')
     scheduler_module._original_run_scheduler_process(        
         server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
@@ -412,13 +415,15 @@ def patched_run_data_parallel_controller_process(
 
     import sglang.srt.managers.data_parallel_controller as dp_controller_module
 
+    if not hasattr(dp_controller_module, '_original_run_data_parallel_controller_process'):
+            dp_controller_module._original_run_data_parallel_controller_process = dp_controller_module.run_data_parallel_controller_process
+
     assert hasattr(dp_controller_module, '_original_run_data_parallel_controller_process')
     dp_controller_module._original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
 
 # ===================================================================
 def apply_entrypoint_patches():
     print(f"[PATCH] Applying entrypoint patches for SGLang server in {os.getpid()} ...")
-    global original_run_scheduler_process, original_run_data_parallel_controller_process
 
     try:
         import sglang.srt.managers.scheduler as scheduler_module
