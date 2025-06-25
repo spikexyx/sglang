@@ -11,8 +11,9 @@ import json
 import time
 import torch
 from typing import List, Tuple, Union, Optional
-import sglang.srt.model_executor.model_runner as model_runner_module
+# import sglang.srt.model_executor.model_runner as model_runner_module
 
+print(f"[SGLANG_PATCH] Patch Module loaded in process: {os.getpid()}")
 # ===================================================================
 # All patching code for model runner to handle weight metadata saving
 # ===================================================================
@@ -315,64 +316,170 @@ def _patched_update_weights_metadata(self):
         # logger.error(f"Weight metadata update failed: {e}")
         return False
 # ===================================================================
-print("[PATCH] All patches have been applied.")
+# print("[PATCH] All patches have been applied.")
 
 # ===================================================================
 # Monkey patch the ModelRunner class methods
-model_runner_module.ModelRunner._acquire_weight_lock = _patched_acquire_weight_lock
-model_runner_module.ModelRunner._release_weight_lock = _patched_release_weight_lock
-model_runner_module.ModelRunner._register_weight_hooks = _patched_register_weight_hooks
-model_runner_module.ModelRunner._save_weight_meta = _patched_save_weight_meta
-model_runner_module.ModelRunner._save_total_weight_meta = _patched_save_total_weight_meta
-model_runner_module.ModelRunner._calculate_device_weight_sizes = _patched_calculate_device_weight_sizes
-model_runner_module.ModelRunner._handle_weight_update_hooks = _patched_handle_weight_update_hooks
-model_runner_module.ModelRunner._clear_old_weight_data = _patched_clear_old_weight_data
-model_runner_module.ModelRunner._register_updated_weight_hooks = _patched_register_updated_weight_hooks
-model_runner_module.ModelRunner._save_updated_weight_metadata = _patched_save_updated_weight_metadata
-model_runner_module.ModelRunner._save_weight_update_summary = _patched_save_weight_update_summary
-model_runner_module.ModelRunner._validate_weight_update = _patched_validate_weight_update
-model_runner_module.ModelRunner.update_weights_metadata = _patched_update_weights_metadata
+
+def apply_model_runner_patches():
+    try:
+        from sglang.srt.model_executor.model_runner import ModelRunner
+
+        ModelRunner._acquire_weight_lock = _patched_acquire_weight_lock
+        ModelRunner._release_weight_lock = _patched_release_weight_lock
+        ModelRunner._register_weight_hooks = _patched_register_weight_hooks
+        ModelRunner._save_weight_meta = _patched_save_weight_meta
+        ModelRunner._save_total_weight_meta = _patched_save_total_weight_meta
+        ModelRunner._calculate_device_weight_sizes = _patched_calculate_device_weight_sizes
+        ModelRunner._handle_weight_update_hooks = _patched_handle_weight_update_hooks
+        ModelRunner._clear_old_weight_data = _patched_clear_old_weight_data
+        ModelRunner._register_updated_weight_hooks = _patched_register_updated_weight_hooks
+        ModelRunner._save_updated_weight_metadata = _patched_save_updated_weight_metadata
+        ModelRunner._save_weight_update_summary = _patched_save_weight_update_summary
+        ModelRunner._validate_weight_update = _patched_validate_weight_update
+        ModelRunner.update_weights_metadata = _patched_update_weights_metadata
+
+        # Patch load_model
+        original_load_model = ModelRunner.load_model
+
+        def patched_load_model(self):
+            print("[PATCH] Patching ModelRunner.load_model to handle weight metadata loading")
+            original_load_model(self)
+            # Register hooks after model is loaded
+            self._register_weight_hooks()
+
+        ModelRunner.load_model = patched_load_model
+
+        # Patch update_weights_from_disk
+        original_update_weights_from_disk = ModelRunner.update_weights_from_disk
+
+        def patched_update_weights_from_disk(
+                self, model_path: str, load_format: str
+            ) -> tuple[bool, str]:
+            print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
+            result = original_update_weights_from_disk(self, model_path, load_format)
+            # Register hooks after weights are updated
+            self.update_weights_metadata()
+            return result
+        
+        ModelRunner.update_weights_from_disk = patched_update_weights_from_disk
+        
+        # Patch update_weights_from_tensor
+        original_update_weights_from_tensor = ModelRunner.update_weights_from_tensor
+
+        def patched_update_weights_from_tensor(
+                self,
+                named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
+                load_format: Optional[str] = None,
+            ):
+            print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
+            result = original_update_weights_from_tensor(self, named_tensors, load_format)
+            # Register hooks after weights are updated
+            self.update_weights_metadata()
+            return result
+        
+        ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
+
+    except Exception as e:
+        print(f"[PATCH] Failed to apply ModelRunner patches: {e}")
+        raise
+
+# ====================================================================
+# Patch the run_scheduler_process and run_data_parallel_controller_process functions (subprocesses)
+from sglang.srt.server_args import ServerArgs, PortArgs
+
+original_run_scheduler_process = None
+original_run_data_parallel_controller_process = None
+
+def patched_run_scheduler_process(
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        gpu_id: int,
+        tp_rank: int,
+        pp_rank: int,
+        dp_rank: Optional[int],
+        pipe_writer,
+    ):
+    apply_model_runner_patches()
+
+    if original_run_scheduler_process:
+        original_run_scheduler_process(
+            server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, pipe_writer
+        )
+    else:
+        print("[PATCH] No original run_scheduler_process found, skipping.")
+
+def patched_run_data_parallel_controller_process(
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        pipe_writer,
+    ):
+    apply_model_runner_patches()
+
+    if original_run_data_parallel_controller_process:
+        original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
+    else:
+        print("[PATCH] No original run_data_parallel_controller_process found, skipping.")
+    
+# ===================================================================
+def apply_entrypoint_patches():
+    global original_run_scheduler_process, original_run_data_parallel_controller_process
+
+    try:
+        from sglang.srt.managers.scheduler import run_scheduler_process
+        from sglang.srt.managers.data_parallel_controller import run_data_parallel_controller_process
+
+        original_run_scheduler_process = run_scheduler_process
+        original_run_data_parallel_controller_process = run_data_parallel_controller_process
+
+        # Patch the functions
+        run_scheduler_process = patched_run_scheduler_process
+        run_data_parallel_controller_process = patched_run_data_parallel_controller_process
+
+    except Exception as e:
+        print(f"[PATCH] Failed to import necessary modules for entrypoint patching: {e}")
+        raise
 
 # ===================================================================
 # Patch the load_model method to handle weight metadata loading
-original_load_model = model_runner_module.ModelRunner.load_model
+# original_load_model = model_runner_module.ModelRunner.load_model
 
-def patched_load_model(self):
-    print("[PATCH] Patching ModelRunner.load_model to handle weight metadata loading")
-    original_load_model(self)
-    # Register hooks after model is loaded
-    self._register_weight_hooks()  
+# def patched_load_model(self):
+#     print("[PATCH] Patching ModelRunner.load_model to handle weight metadata loading")
+#     original_load_model(self)
+#     # Register hooks after model is loaded
+#     self._register_weight_hooks()  
 
 # ===================================================================
 # Patch the update_weights_from_disk method to handle update weight
-original_update_weights_from_disk = model_runner_module.ModelRunner.update_weights_from_disk
+# original_update_weights_from_disk = model_runner_module.ModelRunner.update_weights_from_disk
 
-def patched_update_weights_from_disk(
-        self, model_path: str, load_format: str
-    ) -> tuple[bool, str]:
-    print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
-    result = original_update_weights_from_disk(self, model_path, load_format)
-    # Register hooks after weights are updated
-    self.update_weights_metadata()
-    return result
+# def patched_update_weights_from_disk(
+#         self, model_path: str, load_format: str
+#     ) -> tuple[bool, str]:
+#     print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
+#     result = original_update_weights_from_disk(self, model_path, load_format)
+#     # Register hooks after weights are updated
+#     self.update_weights_metadata()
+#     return result
 
 # ===================================================================
 # Patch the update_weights_from_tensor method to handle update weight
-original_update_weights_from_tensor = model_runner_module.ModelRunner.update_weights_from_tensor
+# original_update_weights_from_tensor = model_runner_module.ModelRunner.update_weights_from_tensor
 
-def patched_update_weights_from_tensor(
-        self,
-        named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
-        load_format: Optional[str] = None,
-    ):
-    print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
-    result = original_update_weights_from_tensor(self, named_tensors, load_format)
-    # Register hooks after weights are updated
-    self.update_weights_metadata()
-    return result
+# def patched_update_weights_from_tensor(
+#         self,
+#         named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
+#         load_format: Optional[str] = None,
+#     ):
+#     print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
+#     result = original_update_weights_from_tensor(self, named_tensors, load_format)
+#     # Register hooks after weights are updated
+#     self.update_weights_metadata()
+#     return result
 
 # ===================================================================
 # Apply the patches to the ModelRunner class
-model_runner_module.ModelRunner.load_model = patched_load_model
-model_runner_module.ModelRunner.update_weights_from_disk = patched_update_weights_from_disk
-model_runner_module.ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
+# model_runner_module.ModelRunner.load_model = patched_load_model
+# model_runner_module.ModelRunner.update_weights_from_disk = patched_update_weights_from_disk
+# model_runner_module.ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
