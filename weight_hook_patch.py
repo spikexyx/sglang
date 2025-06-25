@@ -1,15 +1,16 @@
 import sys
 import os
 
-wrapper_dir = os.path.dirname(os.path.abspath(__file__))
-python_source_dir = os.path.join(wrapper_dir, "python")
-sys.path.insert(0, python_source_dir)
+# wrapper_dir = os.path.dirname(os.path.abspath(__file__))
+# python_source_dir = os.path.join(wrapper_dir, "python")
+# sys.path.insert(0, python_source_dir)
 
 import fcntl
-import runpy
+# import runpy
 import json
 import time
 import torch
+from typing import List, Tuple, Union, Optional
 import sglang.srt.model_executor.model_runner as model_runner_module
 
 # ===================================================================
@@ -346,9 +347,11 @@ def patched_load_model(self):
 # Patch the update_weights_from_disk method to handle update weight
 original_update_weights_from_disk = model_runner_module.ModelRunner.update_weights_from_disk
 
-def patched_update_weights_from_disk(self, weights_path: str):
+def patched_update_weights_from_disk(
+        self, model_path: str, load_format: str
+    ) -> tuple[bool, str]:
     print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
-    result = original_update_weights_from_disk(self, weights_path)
+    result = original_update_weights_from_disk(self, model_path, load_format)
     # Register hooks after weights are updated
     self.update_weights_metadata()
     return result
@@ -357,9 +360,13 @@ def patched_update_weights_from_disk(self, weights_path: str):
 # Patch the update_weights_from_tensor method to handle update weight
 original_update_weights_from_tensor = model_runner_module.ModelRunner.update_weights_from_tensor
 
-def patched_update_weights_from_tensor(self, weights: dict):
+def patched_update_weights_from_tensor(
+        self,
+        named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
+        load_format: Optional[str] = None,
+    ):
     print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
-    result = original_update_weights_from_tensor(self, weights)
+    result = original_update_weights_from_tensor(self, named_tensors, load_format)
     # Register hooks after weights are updated
     self.update_weights_metadata()
     return result
@@ -369,9 +376,3 @@ def patched_update_weights_from_tensor(self, weights: dict):
 model_runner_module.ModelRunner.load_model = patched_load_model
 model_runner_module.ModelRunner.update_weights_from_disk = patched_update_weights_from_disk
 model_runner_module.ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
-
-# ===================================================================
-# Apply the patches and run
-if __name__ == "__main__":
-    sys.path.insert(0, os.getcwd())
-    runpy.run_module("sglang.launch_server", run_name="__main__", alter_sys=True)
