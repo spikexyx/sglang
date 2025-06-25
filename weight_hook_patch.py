@@ -322,6 +322,7 @@ def _patched_update_weights_metadata(self):
 # Monkey patch the ModelRunner class methods
 
 def apply_model_runner_patches():
+    print(f"[PATCH] Applying model runner patches in process {os.getpid()}...")
     try:
         from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -400,6 +401,7 @@ def patched_run_scheduler_process(
         dp_rank: Optional[int],
         pipe_writer,
     ):
+    print(f"[PATCH] Patching run_scheduler_process for GPU {gpu_id}, TP rank {tp_rank}, PP rank {pp_rank}, DP rank {dp_rank} in process {os.getpid()} ...")
     apply_model_runner_patches()
 
     if original_run_scheduler_process:
@@ -414,6 +416,7 @@ def patched_run_data_parallel_controller_process(
         port_args: PortArgs,
         pipe_writer,
     ):
+    print(f"[PATCH] Patching run_data_parallel_controller_process in process {os.getpid()} ...")
     apply_model_runner_patches()
 
     if original_run_data_parallel_controller_process:
@@ -423,6 +426,7 @@ def patched_run_data_parallel_controller_process(
     
 # ===================================================================
 def apply_entrypoint_patches():
+    print(f"[PATCH] Applying entrypoint patches for SGLang server in {os.getpid()} ...")
     global original_run_scheduler_process, original_run_data_parallel_controller_process
 
     try:
