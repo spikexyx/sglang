@@ -46,7 +46,7 @@ fi
 echo "Using Python executable: ${PYTHON_EXEC}"
 
 # Get the first site-packages path. The python command is robust against empty results.
-SITE_PACKAGES_DIR=$($PYTHON_EXEC -c "import site; print(site.getsitepackages()[0] if site.getsitepackages() else '')")
+SITE_PACKAGES_DIR=$($PYTHON_EXEC -c "import site; print(site.getsitepackages()[0] if site.getsitepackages() else '')" | tail -n 1)
 
 if [ -z "$SITE_PACKAGES_DIR" ] || [ ! -d "$SITE_PACKAGES_DIR" ]; then
     echo -e "${RED}Error: Could not determine a valid site-packages directory.${NC}"

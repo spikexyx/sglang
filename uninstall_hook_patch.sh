@@ -27,7 +27,7 @@ if [ -z "$PYTHON_EXEC" ]; then
 fi
 echo "Using Python executable: ${PYTHON_EXEC}"
 
-SITE_PACKAGES_DIR=$($PYTHON_EXEC -c "import site; print(site.getsitepackages()[0] if site.getsitepackages() else '')")
+SITE_PACKAGES_DIR=$($PYTHON_EXEC -c "import site; print(site.getsitepackages()[0] if site.getsitepackages() else '')" | tail -n 1)
 
 if [ -z "$SITE_PACKAGES_DIR" ] || [ ! -d "$SITE_PACKAGES_DIR" ]; then
     echo -e "${RED}Error: Could not determine a valid site-packages directory.${NC}"

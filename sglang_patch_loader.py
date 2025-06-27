@@ -30,6 +30,9 @@ def apply_sglang_patches():
     if "sglang.launch_server" in " ".join(sys.argv):
         is_launch_server = True
 
+    if 'sglang' in sys.argv[0] and 'launch_server.py' in sys.argv[0]:
+        is_launch_server = True
+
     if not is_launch_server:
         return
 
