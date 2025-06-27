@@ -18,6 +18,8 @@ def apply_sglang_patches():
     """
     # --- Safe check：Only apply patch when sglang.launch_server ---
     print("[SGLANG_PATCH_LOADER] Checking if sglang.launch_server is running...")
+
+    full_command = " ".join(sys.argv)
     
     # Check `-m sglang.launch_server` feature
     is_launch_server = False
@@ -31,6 +33,9 @@ def apply_sglang_patches():
         is_launch_server = True
 
     if 'sglang' in sys.argv[0] and 'launch_server.py' in sys.argv[0]:
+        is_launch_server = True
+
+    if 'sglang.launch_server' in full_command:
         is_launch_server = True
 
     if not is_launch_server:
