@@ -1,61 +1,70 @@
-# sglang_patch_loader.py
-'''
-Usage: 
-Use install_hook_patch.sh to install the SGLang patch.
-Use uninstall_hook_patch.sh to remove the patch.
-Or manually:
-Put sglang_patch_loader.py & sglang_weight_hook_patch_core.py & sglang_injector.pth into the python site-packages directory of the target environment.
-Use this command to find the site-packages directory:
-python -c "import site; print(site.getsitepackages()[0])"
-'''
+# sglang_patch_loader.py (Optimized: Patch only in the main process)
 
-import sys
 import os
+import sys
 
-def apply_sglang_patches():
+def is_main_sglang_process():
     """
-    Checks if the target module is being run and applies patches if so.
+    Detects if the current process is the main SGLang server process.
+    This combines the most reliable checks we've found.
     """
-    # --- Safe check：Only apply patch when sglang.launch_server ---
-    print("[SGLANG_PATCH_LOADER] Checking if sglang.launch_server is running...")
+    argv = sys.argv
+    main_module = sys.modules.get('__main__')
 
-    full_command = " ".join(sys.argv)
-    
-    # Check `-m sglang.launch_server` feature
-    is_launch_server = False
-    if len(sys.argv) > 1 and sys.argv[1] == "-m" and "sglang.launch_server" in sys.argv:
-         is_launch_server = True
-    # Check `python sglang/launch_server.py` feature
-    elif "sglang/launch_server.py" in sys.argv[0]:
-         is_launch_server = True
-    # Check "sglang.launch_server"
-    if "sglang.launch_server" in " ".join(sys.argv):
-        is_launch_server = True
+    # --- Check 1: The most reliable method via runpy ---
+    # `python -m sglang.launch_server` is executed by the `runpy` module.
+    if main_module and hasattr(main_module, '__file__') and main_module.__file__:
+        if 'runpy.py' in main_module.__file__ and 'sglang.launch_server' in argv:
+            print("[SGLANG_PATCH_LOADER] >> Detected main process via runpy.")
+            return True
 
-    if 'sglang' in sys.argv[0] and 'launch_server.py' in sys.argv[0]:
-        is_launch_server = True
-
-    if 'sglang.launch_server' in full_command:
-        is_launch_server = True
-
-    if not is_launch_server:
-        return
-
-    print("[SGLANG_PATCH_LOADER] Detected sglang.launch_server startup. Applying patches...")
-    
-    try:
-        # sglang_weight_hook_patch_core.py and sglang_patch_loader.py should be in the same directory
-        loader_dir = os.path.dirname(os.path.abspath(__file__))
-        if loader_dir not in sys.path:
-            sys.path.insert(0, loader_dir)
-            
-        import sglang_weight_hook_patch_core
-        sglang_weight_hook_patch_core.apply_entrypoint_patches()
+    # --- Check 2: Fallback for your specific environment's argv structure ---
+    # sys.argv is ['-m', '--model-path', ...]
+    if len(argv) > 1 and argv[0] == '-m' and '--model-path' in argv:
+        print("[SGLANG_PATCH_LOADER] >> Detected main process via special argv heuristic.")
+        return True
         
-        print("[SGLANG_PATCH_LOADER] Patches applied successfully.")
+    # --- Check 3: Standard argv check (less likely for you but good for general use) ---
+    if len(argv) > 0 and 'sglang/launch_server.py' in argv[0]:
+        print("[SGLANG_PATCH_LOADER] >> Detected main process via script path in argv.")
+        return True
 
-    except Exception as e:
-        print(f"[SGLANG_PATCH_LOADER] WARNING: Failed to apply patches: {e}", file=sys.stderr)
+    return False
+
+def run_patch():
+    """
+    Applies the patch ONLY if the current process is identified as the
+    main SGLang server process. Child processes will inherit the patched state
+    and will not re-apply the patch.
+    """
+    # This entire block of code will run in every process (main and children)
+    # because of the .pth mechanism.
+    
+    # However, we only take action in the main process.
+    if is_main_sglang_process():
+        print(f"[SGLANG_PATCH_LOADER] >> Main SGLang process (PID: {os.getpid()}) confirmed. Applying patch now...")
+        try:
+            # Import the patch core only when needed
+            from sglang_weight_hook_patch_core import apply_entrypoint_patches
+            
+            apply_entrypoint_patches()
+            
+            print(f"[SGLANG_PATCH_LOADER] >> Patch successfully applied once in the main process.")
+            # We add a sentinel to prevent re-patching even in the same process, just in case.
+            # This is a good defensive practice.
+            setattr(sys, '_sglang_patch_applied', True)
+
+        except Exception as e:
+            print(f"[SGLANG_PATCH_LOADER] !! ERROR: Failed to apply patch in the main process (PID: {os.getpid()}): {e}")
+    
+    # For child processes or any other python process, this script will now do nothing and exit silently.
+    # You can add a print here for debugging if you want to see it running in children.
+    # else:
+    #     print(f"[SGLANG_PATCH_LOADER] >> Skipping patch in process {os.getpid()} (not main sglang process).")
 
 
-apply_sglang_patches()
+# --- Entry point called by the .pth file ---
+# Add a global guard to ensure this runs only once per process, even if imported multiple times.
+if not hasattr(sys, '_sglang_patch_applied'):
+    run_patch()
+
