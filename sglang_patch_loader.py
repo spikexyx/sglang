@@ -1,6 +1,10 @@
 # sglang_patch_loader.py
 '''
-Usage: Put sglang_patch_loader.py & sglang_weight_hook_patch_core.py & sglang_injector.pth into the python site-packages directory of the target environment.
+Usage: 
+Use install_hook_patch.sh to install the SGLang patch.
+Use uninstall_hook_patch.sh to remove the patch.
+Or manually:
+Put sglang_patch_loader.py & sglang_weight_hook_patch_core.py & sglang_injector.pth into the python site-packages directory of the target environment.
 Use this command to find the site-packages directory:
 python -c "import site; print(site.getsitepackages()[0])"
 '''
@@ -13,6 +17,7 @@ def apply_sglang_patches():
     Checks if the target module is being run and applies patches if so.
     """
     # --- Safe check：Only apply patch when sglang.launch_server ---
+    print("[SGLANG_PATCH_LOADER] Checking if sglang.launch_server is running...")
     
     # Check `-m sglang.launch_server` feature
     is_launch_server = False
