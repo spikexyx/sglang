@@ -25,14 +25,14 @@ from typing import List, Tuple, Union, Optional
 # import sglang.srt.model_executor.model_runner as model_runner_module
 from sglang.srt.server_args import ServerArgs, PortArgs
 
-print(f"[SGLANG_PATCH] Patch Module loaded in process: {os.getpid()}")
+print(f"[SGLANG_PATCH_CORE] Patch Module loaded in process: {os.getpid()}")
 # ===================================================================
 # All patching code for model runner to handle weight metadata saving
 # ===================================================================
 def _patched_acquire_weight_lock(self, timeout=10):
     """acquire weight metadata saving file lock"""
     os.makedirs("weights_metadata", exist_ok=True)
-    lock_file = os.path.join("weights_metadata", f"weight_saving_{self.gpu_id}.lock")
+    lock_file = os.path.join("weights_metadata", f"sglang_weight_saving_{self.gpu_id}.lock")
 
     try:
         self._lock_fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY)
@@ -60,7 +60,7 @@ def _patched_release_weight_lock(self):
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             os.close(self._lock_fd)
             # delete lock file
-            lock_file = os.path.join("weights_metadata", f"weight_saving_{self.gpu_id}.lock")
+            lock_file = os.path.join("weights_metadata", f"sglang_weight_saving_{self.gpu_id}.lock")
             if os.path.exists(lock_file):
                 os.remove(lock_file)
             # logger.info(f"Released weight saving lock for GPU {self.gpu_id}")
@@ -109,7 +109,7 @@ def _patched_save_weight_meta(self):
         # logger.info(f"Save weight metadata to {meta_path}.")
     except IOError as e:
         # logger.error(f"Failed to save weight metadata to {meta_path}: {e}")
-        raise
+        return
 
 def _patched_save_total_weight_meta(self):
     os.makedirs("weights_metadata", exist_ok=True)
@@ -121,7 +121,7 @@ def _patched_save_total_weight_meta(self):
         # logger.info(f"Save total weight metadata to {meta_path}.")
     except IOError as e:
         # logger.error(f"Failed to save total weight metadata to {meta_path}: {e}")
-        raise
+        return
 
 def _patched_calculate_device_weight_sizes(self, unit: str = "bytes") -> dict:
     """Calculate the total size of weights per device in self.weight_infos.
@@ -334,7 +334,7 @@ def _patched_update_weights_metadata(self):
 # Monkey patch the ModelRunner class methods
 
 def apply_model_runner_patches():
-    print(f"[PATCH] Applying model runner patches in process {os.getpid()}...")
+    print(f"[SGLANG_PATCH_CORE] Applying model runner patches in process {os.getpid()}...")
     try:
         from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -355,7 +355,7 @@ def apply_model_runner_patches():
         if not hasattr(ModelRunner, '_original_load_model'):
             ModelRunner._original_load_model = ModelRunner.load_model
             def patched_load_model(self):
-                print("[PATCH] Patching ModelRunner.load_model to handle weight metadata loading")
+                print("[SGLANG_PATCH_CORE] Patching ModelRunner.load_model to handle weight metadata loading")
                 self._original_load_model()
                 # Register hooks after model is loaded
                 self._register_weight_hooks()
@@ -367,7 +367,7 @@ def apply_model_runner_patches():
             def patched_update_weights_from_disk(
                     self, model_path: str, load_format: str
                 ) -> tuple[bool, str]:
-                print("[PATCH] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
+                print("[SGLANG_PATCH_CORE] Patching ModelRunner.update_weights_from_disk to handle update weight metadata loading")
                 result = self._original_update_weights_from_disk(model_path, load_format)
                 # Register hooks after weights are updated
                 self.update_weights_metadata()
@@ -381,7 +381,7 @@ def apply_model_runner_patches():
                     named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
                     load_format: Optional[str] = None,
                 ):
-                print("[PATCH] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
+                print("[SGLANG_PATCH_CORE] Patching ModelRunner.update_weights_from_tensor to handle update weight metadata loading")
                 result = self._original_update_weights_from_tensor(named_tensors, load_format)
                 # Register hooks after weights are updated
                 self.update_weights_metadata()
@@ -389,11 +389,12 @@ def apply_model_runner_patches():
             ModelRunner.update_weights_from_tensor = patched_update_weights_from_tensor
 
     except Exception as e:
-        print(f"[PATCH] Failed to apply ModelRunner patches: {e}")
-        raise
+        print(f"[SGLANG_PATCH_CORE] Failed to apply ModelRunner patches: {e}")
+        return
 
 # ====================================================================
 # Patch the run_scheduler_process and run_data_parallel_controller_process functions (subprocesses)
+# NOTE: Aborted.
 def patched_run_scheduler_process(
         server_args: ServerArgs,
         port_args: PortArgs,
@@ -433,6 +434,7 @@ def patched_run_data_parallel_controller_process(
     dp_controller_module._original_run_data_parallel_controller_process(server_args, port_args, pipe_writer)
 
 # ===================================================================
+# NOTE: Aborted.
 def apply_entrypoint_patches():
     print(f"[PATCH] Applying entrypoint patches for SGLang server in {os.getpid()} ...")
 
