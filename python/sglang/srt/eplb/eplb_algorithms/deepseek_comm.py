@@ -375,7 +375,7 @@ def rebalance_experts_hierarchical(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
@@ -471,7 +471,7 @@ def rebalance_experts_with_affinity(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
