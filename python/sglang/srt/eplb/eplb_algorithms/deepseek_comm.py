@@ -8,21 +8,6 @@ from typing import List
 from sglang.srt.utils import get_bool_env_var
 
 
-
-# def cost_function(
-#         src_indice: int, 
-#         target_gpu: int, 
-#         layer_id: int,
-#         current_gpu_weights: torch.Tensor, 
-#         phy2mlog: torch.Tensor,
-#         old_log2phy: torch.Tensor,
-#         groups_per_pack: int,
-#         packs_per_node: int
-# ):
-#     load_cost = current_gpu_weights[target_gpu]
-
-#     return load_cost
-
 def cost_function(
     # --- Identifiers ---
     layer_id: int,
@@ -35,6 +20,7 @@ def cost_function(
     phy2mlog: torch.Tensor,
     old_log2phy: torch.Tensor,
     gpus_per_node: int,
+    groups_per_pack: int,
     # --- Penalty factors (hyperparameters) ---
     intra_node_penalty_factor: float,
     inter_node_penalty_factor: float
@@ -49,21 +35,33 @@ def cost_function(
     logical_id = phy2mlog[layer_id, expert_phy_id].item()
 
     # Find the GPU where this expert was previously located
-    old_gpu = old_log2phy[layer_id, logical_id].item()
+    old_phy_expert_indices = old_log2phy[layer_id, logical_id]
 
-    if old_gpu != target_gpu:
-        # The expert is being moved. Calculate the penalty.
-        old_node_id = old_gpu // gpus_per_node
-        target_node_id = target_gpu // gpus_per_node
+    valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
 
-        if old_node_id == target_node_id:
-            # Intra-node move (e.g., from GPU0 to GPU1 on the same node)
-            # Apply a smaller penalty.
-            communication_penalty = intra_node_penalty_factor * expert_weight
+    if valid_old_phy_indices.numel() == 0:
+        pass
+    else:
+        valid_old_gpus = valid_old_phy_indices // groups_per_pack
+
+        if (valid_old_gpus == target_gpu).any():
+            communication_penalty = 0.0
         else:
-            # Inter-node move (e.g., from GPU0 to GPU8 on a different node)
-            # Apply a larger penalty.
-            communication_penalty = inter_node_penalty_factor * expert_weight
+            min_penalty = float('inf')
+            target_node_id = target_gpu // gpus_per_node
+
+            for old_gpu_tensor in valid_old_gpus:
+                old_gpu = old_gpu_tensor.item()
+                old_node_id = old_gpu // gpus_per_node
+
+                current_penalty = 0.0
+                if old_node_id == target_node_id:
+                    current_penalty = intra_node_penalty_factor * expert_weight
+                else:
+                    current_penalty = inter_node_penalty_factor * expert_weight
+
+                if current_penalty < min_penalty:
+                    min_penalty = current_penalty
 
     # 3. Total Cost
     total_cost = load_cost + communication_penalty
@@ -117,7 +115,9 @@ def balanced_packing_with_affinity(
             group = group.item()
             pack = min(
                 (k for k in range(num_packs) if pack_items[k] < groups_per_pack),
-                key=lambda k: cost_function(i, k, group, weight_cpu[i, group].item(), pack_weights, phy2mlog_cpu, old_log2phy_cpu, packs_per_node, intra_node_penalty_factor, inter_node_penalty_factor)
+                key=lambda k: cost_function(
+                    i, k, group, weight_cpu[i, group].item(), pack_weights, phy2mlog_cpu, old_log2phy_cpu, packs_per_node, groups_per_pack, intra_node_penalty_factor, inter_node_penalty_factor
+                )
             )
             assert pack_items[pack] < groups_per_pack
             pack_index[i, group] = pack
