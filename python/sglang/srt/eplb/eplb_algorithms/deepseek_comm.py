@@ -7,10 +7,7 @@ from typing import List
 
 from sglang.srt.utils import get_bool_env_var
 
-from sglang.srt.eplb.expert_location import (
-    # ExpertLocationMetadata,
-    get_global_expert_location_metadata,
-)
+
 
 # def cost_function(
 #         src_indice: int, 
@@ -227,6 +224,10 @@ def rebalance_experts_hierarchical(
         logical_to_physical_map: [num_moe_layers, num_logical_experts, X]
         logical_count: [num_moe_layers, num_logical_experts]
     """
+    from sglang.srt.eplb.expert_location import (
+        ExpertLocationMetadata,
+        get_global_expert_location_metadata,
+    )
     num_layers, num_logical_experts = weight.shape
     assert num_logical_experts % num_groups == 0
     group_size = num_logical_experts // num_groups
@@ -319,6 +320,10 @@ def rebalance_experts_with_affinity(
         logical_to_physical_map: [num_moe_layers, num_logical_experts, X]
         logical_count: [num_moe_layers, num_logical_experts]
     """
+    from sglang.srt.eplb.expert_location import (
+        ExpertLocationMetadata,
+        get_global_expert_location_metadata,
+    )
     num_layers, num_logical_experts = weight.shape
     assert num_logical_experts % num_groups == 0
     group_size = num_logical_experts // num_groups
