@@ -22,6 +22,8 @@ def rebalance_experts(
     num_groups: Optional[int],
     num_nodes: int,
     algorithm: EplbAlgorithm,
+    intra_node_penalty_factor: float,
+    inter_node_penalty_factor: float,
 ):
     if algorithm in [EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical]:
         return deepseek.rebalance_experts(
@@ -54,6 +56,8 @@ def rebalance_experts(
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_hierarchical,
+            intra_node_penalty_factor = intra_node_penalty_factor,
+            inter_node_penalty_factor = inter_node_penalty_factor
         )
 
     raise NotImplementedError

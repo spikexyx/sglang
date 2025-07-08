@@ -171,6 +171,8 @@ class ServerArgs:
     enable_expert_distribution_metrics: bool = False
     deepep_config: Optional[str] = None
     moe_dense_tp_size: Optional[int] = None
+    eplb_intra_node_penalty: float = 0.2
+    eplb_inter_node_penalty: float = 1.2
 
     # Double Sparsity
     enable_double_sparsity: bool = False
@@ -1627,6 +1629,18 @@ class ServerArgs:
             "--weight-loader-disable-mmap",
             action="store_true",
             help="Disable mmap while loading weight using safetensors.",
+        )
+        parser.add_argument(
+            "--eplb-intra-node-penalty",
+            type=float,
+            default=ServerArgs.eplb_intra_node_penalty,
+            help="The intra-node communication penalty factor for EPLB."
+        )
+        parser.add_argument(
+            "--eplb-inter-node-penalty",
+            type=float,
+            default=ServerArgs.eplb_inter_node_penalty,
+            help="The inter-node communication penalty factor for EPLB."
         )
 
     @classmethod
