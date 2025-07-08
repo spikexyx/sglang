@@ -8,7 +8,7 @@ from typing import List
 from sglang.srt.utils import get_bool_env_var
 
 from sglang.srt.eplb.expert_location import (
-    ExpertLocationMetadata,
+    # ExpertLocationMetadata,
     get_global_expert_location_metadata,
 )
 
