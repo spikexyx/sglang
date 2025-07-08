@@ -126,6 +126,104 @@ def balanced_packing_with_affinity(
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
+def balanced_packing_with_affinity_vectorized(
+    weight: torch.Tensor,
+    num_packs: int,
+    phy2mlog: torch.Tensor,
+    old_log2phy: torch.Tensor,
+    num_nodes: int,
+    intra_node_penalty_factor: float,
+    inter_node_penalty_factor: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Vectorized version of the balanced packing algorithm.
+    It parallelizes the cost calculation for all possible destination packs for a given item.
+    """
+    device = weight.device # Use the original device for calculations
+    num_layers, num_groups = weight.shape
+    assert num_groups % num_packs == 0, "Number of groups must be divisible by number of packs."
+    assert num_packs % num_nodes == 0, "Number of packs must be divisible by number of nodes."
+    groups_per_pack = num_groups // num_packs
+    gpus_per_node = num_packs // num_nodes
+
+    if groups_per_pack == 1:
+        # No change needed here, this case is trivial
+        pack_index = torch.arange(num_groups, dtype=torch.int64, device=device).expand(weight.shape)
+        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
+        return pack_index, rank_in_pack
+
+    # Sort experts by weight in descending order
+    indices = weight.float().sort(-1, descending=True).indices
+
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64)
+    rank_in_pack = torch.full_like(pack_index, fill_value=-1)
+
+    all_target_gpus = torch.arange(num_packs, device=device)
+    all_target_nodes = all_target_gpus // gpus_per_node
+
+    for i in range(num_layers):
+        # Use tensors for tracking pack state
+        pack_weights = torch.zeros(num_packs, dtype=weight.dtype, device=device)
+        pack_items_count = torch.zeros(num_packs, dtype=torch.int64, device=device)
+
+        # Iterate through experts, from heaviest to lightest
+        for group_phy_id_tensor in indices[i]:
+            group_phy_id = group_phy_id_tensor.item()
+            expert_weight = weight[i, group_phy_id].item()
+
+            # --- Start of Vectorized Cost Calculation ---
+            
+            # 1. Load Cost (already a vector)
+            load_costs = pack_weights
+
+            # 2. Communication Cost
+            logical_id = phy2mlog[i, group_phy_id].item()
+            old_phy_expert_indices = old_log2phy[i, logical_id]
+            valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
+            
+            comm_costs = torch.zeros(num_packs, dtype=weight.dtype, device=device)
+
+            if valid_old_phy_indices.numel() > 0:
+                valid_old_gpus = valid_old_phy_indices // groups_per_pack
+                valid_old_nodes = valid_old_gpus // gpus_per_node
+                
+                # Use broadcasting to find relationships between all target GPUs and all old GPUs
+                # Shapes: all_target_gpus[num_packs, 1], valid_old_gpus[1, num_replicas]
+                is_same_gpu = (all_target_gpus.unsqueeze(1) == valid_old_gpus.unsqueeze(0))
+                is_retained_on_gpu = is_same_gpu.any(dim=1) # Shape: [num_packs]
+                
+                # Shapes: all_target_nodes[num_packs, 1], valid_old_nodes[1, num_replicas]
+                is_same_node = (all_target_nodes.unsqueeze(1) == valid_old_nodes.unsqueeze(0))
+                is_intra_node_possible = is_same_node.any(dim=1) # Shape: [num_packs]
+
+                # Calculate penalty vector
+                comm_penalties = torch.full((num_packs,), inter_node_penalty_factor, device=device, dtype=weight.dtype)
+                comm_penalties[is_intra_node_possible] = intra_node_penalty_factor
+                comm_penalties[is_retained_on_gpu] = 0.0
+                
+                comm_costs = comm_penalties * expert_weight
+
+            # 3. Total Cost
+            total_costs = load_costs + comm_costs
+
+            # 4. Mask out full packs
+            full_mask = (pack_items_count >= groups_per_pack)
+            total_costs[full_mask] = float('inf')
+
+            # 5. Find the best pack
+            best_pack = torch.argmin(total_costs).item()
+
+            # --- End of Vectorized Cost Calculation ---
+
+            # Assign the expert and update pack state
+            assert pack_items_count[best_pack] < groups_per_pack, "Error: Selected a full pack"
+            pack_index[i, group_phy_id] = best_pack
+            rank_in_pack[i, group_phy_id] = pack_items_count[best_pack]
+            pack_weights[best_pack] += expert_weight
+            pack_items_count[best_pack] += 1
+            
+    return pack_index, rank_in_pack
+
 def balanced_packing(
     weight: torch.Tensor, num_packs: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -274,7 +372,7 @@ def rebalance_experts_hierarchical(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
@@ -370,7 +468,7 @@ def rebalance_experts_with_affinity(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
