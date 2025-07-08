@@ -140,6 +140,9 @@ def balanced_packing_with_affinity_vectorized(
     It parallelizes the cost calculation for all possible destination packs for a given item.
     """
     device = weight.device # Use the original device for calculations
+    phy2mlog = phy2mlog.to(device)
+    old_log2phy = old_log2phy.to(device)
+
     num_layers, num_groups = weight.shape
     assert num_groups % num_packs == 0, "Number of groups must be divisible by number of packs."
     assert num_packs % num_nodes == 0, "Number of packs must be divisible by number of nodes."
