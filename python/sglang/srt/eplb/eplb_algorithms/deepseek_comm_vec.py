@@ -462,8 +462,8 @@ def make_redundant_experts_chunkwise(
         scaled_inter_penalty = inter_node_penalty * score_mean_per_layer.unsqueeze(-1)
         scaled_intra_penalty = intra_node_penalty * score_mean_per_layer.unsqueeze(-1)
 
-        expanded_inter_penalty = scaled_inter_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
-        expanded_intra_penalty = scaled_intra_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
+        # expanded_inter_penalty = scaled_inter_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
+        # expanded_intra_penalty = scaled_intra_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
 
         comm_bonus = torch.zeros(
             num_moe_layers, num_physical_experts, num_physical_experts, 
