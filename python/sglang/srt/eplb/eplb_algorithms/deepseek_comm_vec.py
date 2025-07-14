@@ -469,8 +469,8 @@ def make_redundant_experts_chunkwise(
             num_moe_layers, num_physical_experts, num_physical_experts, 
             device=base_score.device
         )
-        # comm_bonus[bonus_mask_no_move] = scaled_inter_penalty.expand_as(comm_bonus)[bonus_mask_no_move]
-        comm_bonus[bonus_mask_no_move] = scaled_inter_penalty
+        comm_bonus[bonus_mask_no_move] = scaled_inter_penalty.expand_as(comm_bonus)[bonus_mask_no_move]
+        # comm_bonus[bonus_mask_no_move] = scaled_inter_penalty
         # comm_bonus = torch.where(
         #     bonus_mask_intra_node, 
         #     expanded_intra_penalty, 
