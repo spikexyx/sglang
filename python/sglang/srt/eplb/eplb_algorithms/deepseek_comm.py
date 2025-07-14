@@ -1,7 +1,8 @@
 # This file is copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py since that one is not a pypi package
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
+import numpy as np
 
 from typing import List
 
@@ -127,121 +128,125 @@ def balanced_packing_with_affinity(
     return pack_index, rank_in_pack
 
 def balanced_packing_with_affinity_vectorized(
-    weight: torch.Tensor,
-    num_packs: int,
-    phy2mlog: torch.Tensor,
-    old_log2phy: torch.Tensor,
+    weight: torch.Tensor, 
+    num_packs: int, 
+    phy2mlog: torch.Tensor, 
+    old_log2phy: torch.Tensor, 
     num_nodes: int,
-    intra_node_penalty_factor: float,
-    inter_node_penalty_factor: float,
+    intra_node_penalty_factor: float = 0.2,
+    inter_node_penalty_factor: float = 1.2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Vectorized version of the balanced packing algorithm.
-    It parallelizes the cost calculation for all possible destination packs for a given item.
+    Optimized version using vectorization to speed up cost calculation.
     """
-    device = torch.device("cpu")
-    weight = weight.to(device)
-    phy2mlog = phy2mlog.to(device)
-    old_log2phy = old_log2phy.to(device)
-
     num_layers, num_groups = weight.shape
-    assert num_groups % num_packs == 0, "Number of groups must be divisible by number of packs."
-    assert num_packs % num_nodes == 0, "Number of packs must be divisible by number of nodes."
+    assert num_groups % num_packs == 0
     groups_per_pack = num_groups // num_packs
+    # Assuming num_packs represents the total number of GPUs.
     gpus_per_node = num_packs // num_nodes
 
     if groups_per_pack == 1:
-        pack_index = torch.arange(num_groups, dtype=torch.int64, device=device).expand(weight.shape)
+        pack_index = torch.arange(
+            weight.size(-1), dtype=torch.int64, device=weight.device
+        ).expand(weight.shape)
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
-    indices = weight.float().sort(-1, descending=True).indices
-
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64)
+    # Sort experts by weight (greedy strategy)
+    indices = weight.float().sort(-1, descending=True).indices.cpu()
+    
+    # Initialize output tensors on CPU
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
 
-    all_target_gpus = torch.arange(num_packs, device=device)
-    all_target_nodes = all_target_gpus // gpus_per_node
+    # Move all necessary data to CPU once to avoid repeated transfers
+    weight_cpu = weight.cpu()
+    phy2mlog_cpu = phy2mlog.cpu()
+    old_log2phy_cpu = old_log2phy.cpu()
+    
+    # Pre-calculate GPU and Node IDs for all packs
+    # This avoids repeated calculations inside the loop
+    all_gpus = torch.arange(num_packs, dtype=torch.int64)
+    all_nodes = all_gpus // gpus_per_node
 
     for i in range(num_layers):
-        pack_weights = torch.zeros(num_packs, dtype=weight.dtype, device=device)
-        pack_items_count = torch.zeros(num_packs, dtype=torch.int64, device=device)
+        # Use NumPy arrays for fast CPU computation. PyTorch CPU tensors are also fine.
+        pack_weights = np.zeros(num_packs, dtype=np.float32)
+        pack_items = np.zeros(num_packs, dtype=np.int32)
+        
+        # Iterate through experts sorted by weight
+        for expert_phy_id in indices[i]:
+            expert_phy_id = expert_phy_id.item()
+            expert_w = weight_cpu[i, expert_phy_id].item()
 
-        for group_phy_id_tensor in indices[i]:
-            group_phy_id = group_phy_id_tensor.item()
-            expert_weight = weight[i, group_phy_id].item()
+            # --- Vectorized Cost Calculation ---
 
-            # --- Start of Vectorized Cost Calculation ---
-            
-            # 1. Load Cost (vector)
-            load_costs = pack_weights
+            # 1. Load Cost: This is simply the current weight of all packs.
+            # Shape: (num_packs,)
+            load_cost_vec = pack_weights
 
-            # 2. Communication Cost
-            logical_id = phy2mlog[i, group_phy_id].item()
-            old_phy_expert_indices = old_log2phy[i, logical_id]
+            # 2. Communication Affinity Cost (Vectorized)
+            # Shape: (num_packs,)
+            comm_cost_vec = np.full(num_packs, float('inf'), dtype=np.float32)
+
+            logical_id = phy2mlog_cpu[i, expert_phy_id].item()
+            old_phy_expert_indices = old_log2phy_cpu[i, logical_id]
             valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
             
-            comm_costs = torch.zeros(num_packs, dtype=weight.dtype, device=device)
-
-            if valid_old_phy_indices.numel() > 0:
+            if valid_old_phy_indices.numel() == 0:
+                # If the expert is new, assume the highest penalty for all locations
+                # This encourages balancing among the least loaded packs.
+                # A penalty of 0 might also be a valid choice if there's no affinity history.
+                comm_cost_vec.fill(inter_node_penalty_factor * expert_w)
+            else:
                 valid_old_gpus = valid_old_phy_indices // groups_per_pack
-                valid_old_nodes = valid_old_gpus // gpus_per_node
                 
-                # --- CORRECTED LOGIC START ---
-                #
-                # Goal: For each target GPU, find the minimum communication cost 
-                # from any of the previous expert locations.
+                # Default penalty is inter-node
+                comm_cost_vec.fill(inter_node_penalty_factor * expert_w)
 
-                # Expand dims for broadcasting:
-                # all_target_gpus: [num_packs, 1]
-                # valid_old_gpus:  [1, num_replicas]
-                # all_target_nodes: [num_packs, 1]
-                # valid_old_nodes:  [1, num_replicas]
-                
-                # Create a relationship matrix: [num_packs, num_replicas]
-                is_same_gpu_matrix = all_target_gpus.unsqueeze(1) == valid_old_gpus.unsqueeze(0)
-                is_same_node_matrix = all_target_nodes.unsqueeze(1) == valid_old_nodes.unsqueeze(0)
-                
-                # Create a penalty matrix based on the relationships
-                # Shape: [num_packs, num_replicas]
-                penalty_matrix = torch.full_like(is_same_node_matrix, 
-                                                inter_node_penalty_factor, 
-                                                device=device, dtype=weight.dtype)
-                penalty_matrix[is_same_node_matrix] = intra_node_penalty_factor
-                penalty_matrix[is_same_gpu_matrix] = 0.0
-                
-                # For each target GPU (row), find the minimum penalty from any old location (column)
-                # Shape: [num_packs]
-                min_penalties, _ = torch.min(penalty_matrix, dim=1)
-                
-                comm_costs = min_penalties * expert_weight
-                # --- CORRECTED LOGIC END ---
+                # For each previous GPU, update the cost vector
+                for old_gpu in valid_old_gpus:
+                    old_gpu = old_gpu.item()
+                    old_node_id = old_gpu // gpus_per_node
+                    
+                    # Calculate penalties for placing the expert on any GPU,
+                    # relative to this *one* old_gpu location.
+                    # is_intra_node is a boolean mask of shape (num_packs,)
+                    is_intra_node = (all_nodes == old_node_id).numpy()
+                    
+                    # current_penalties is a vector of shape (num_packs,)
+                    current_penalties = np.where(
+                        is_intra_node, 
+                        intra_node_penalty_factor * expert_w, 
+                        inter_node_penalty_factor * expert_w
+                    )
+                    
+                    # We only care about the minimum penalty if the expert existed in multiple places
+                    comm_cost_vec = np.minimum(comm_cost_vec, current_penalties)
 
-            # 3. Total Cost
-            total_costs = load_costs + comm_costs
+                # Set penalty to 0 for GPUs where the expert already was.
+                # This is the most preferred location.
+                comm_cost_vec[valid_old_gpus.numpy()] = 0.0
 
-            # 4. Mask out full packs
-            full_mask = (pack_items_count >= groups_per_pack)
-            total_costs[full_mask] = float('inf')
+            # 3. Total Cost Vector
+            total_cost_vec = load_cost_vec + comm_cost_vec
 
-            # 5. Find the best pack
-            # Check if all costs are inf to prevent argmin error on some torch versions
-            if torch.all(full_mask):
-                # This should not happen if logic is correct, but as a safeguard
-                raise RuntimeError("All packs are full, but there are still experts to place.")
-            best_pack = torch.argmin(total_costs).item()
-
-            # --- End of Vectorized Cost Calculation ---
-
-            # Assign the expert and update pack state
-            assert pack_items_count[best_pack] < groups_per_pack, "Error: Selected a full pack"
-            pack_index[i, group_phy_id] = best_pack
-            rank_in_pack[i, group_phy_id] = pack_items_count[best_pack]
-            pack_weights[best_pack] += expert_weight
-            pack_items_count[best_pack] += 1
+            # --- Find Best Pack ---
+            # Mask out packs that are already full
+            available_mask = pack_items < groups_per_pack
+            total_cost_vec[~available_mask] = float('inf')
             
-    return pack_index, rank_in_pack
+            # Find the pack with the minimum cost among available packs
+            best_pack = np.argmin(total_cost_vec)
 
+            # --- Update State ---
+            assert pack_items[best_pack] < groups_per_pack
+            pack_index[i, expert_phy_id] = best_pack
+            rank_in_pack[i, expert_phy_id] = pack_items[best_pack]
+            pack_weights[best_pack] += expert_w
+            pack_items[best_pack] += 1
+            
+    return pack_index.to(weight.device), rank_in_pack.to(weight.device)
 
 # def balanced_packing_with_affinity_vectorized(
 #     weight: torch.Tensor,
@@ -256,7 +261,8 @@ def balanced_packing_with_affinity_vectorized(
 #     Vectorized version of the balanced packing algorithm.
 #     It parallelizes the cost calculation for all possible destination packs for a given item.
 #     """
-#     device = weight.device # Use the original device for calculations
+#     device = torch.device("cpu")
+#     weight = weight.to(device)
 #     phy2mlog = phy2mlog.to(device)
 #     old_log2phy = old_log2phy.to(device)
 
@@ -267,12 +273,10 @@ def balanced_packing_with_affinity_vectorized(
 #     gpus_per_node = num_packs // num_nodes
 
 #     if groups_per_pack == 1:
-#         # No change needed here, this case is trivial
 #         pack_index = torch.arange(num_groups, dtype=torch.int64, device=device).expand(weight.shape)
 #         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
 #         return pack_index, rank_in_pack
 
-#     # Sort experts by weight in descending order
 #     indices = weight.float().sort(-1, descending=True).indices
 
 #     pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64)
@@ -282,18 +286,16 @@ def balanced_packing_with_affinity_vectorized(
 #     all_target_nodes = all_target_gpus // gpus_per_node
 
 #     for i in range(num_layers):
-#         # Use tensors for tracking pack state
 #         pack_weights = torch.zeros(num_packs, dtype=weight.dtype, device=device)
 #         pack_items_count = torch.zeros(num_packs, dtype=torch.int64, device=device)
 
-#         # Iterate through experts, from heaviest to lightest
 #         for group_phy_id_tensor in indices[i]:
 #             group_phy_id = group_phy_id_tensor.item()
 #             expert_weight = weight[i, group_phy_id].item()
 
 #             # --- Start of Vectorized Cost Calculation ---
             
-#             # 1. Load Cost (already a vector)
+#             # 1. Load Cost (vector)
 #             load_costs = pack_weights
 
 #             # 2. Communication Cost
@@ -307,21 +309,35 @@ def balanced_packing_with_affinity_vectorized(
 #                 valid_old_gpus = valid_old_phy_indices // groups_per_pack
 #                 valid_old_nodes = valid_old_gpus // gpus_per_node
                 
-#                 # Use broadcasting to find relationships between all target GPUs and all old GPUs
-#                 # Shapes: all_target_gpus[num_packs, 1], valid_old_gpus[1, num_replicas]
-#                 is_same_gpu = (all_target_gpus.unsqueeze(1) == valid_old_gpus.unsqueeze(0))
-#                 is_retained_on_gpu = is_same_gpu.any(dim=1) # Shape: [num_packs]
-                
-#                 # Shapes: all_target_nodes[num_packs, 1], valid_old_nodes[1, num_replicas]
-#                 is_same_node = (all_target_nodes.unsqueeze(1) == valid_old_nodes.unsqueeze(0))
-#                 is_intra_node_possible = is_same_node.any(dim=1) # Shape: [num_packs]
+#                 # --- CORRECTED LOGIC START ---
+#                 #
+#                 # Goal: For each target GPU, find the minimum communication cost 
+#                 # from any of the previous expert locations.
 
-#                 # Calculate penalty vector
-#                 comm_penalties = torch.full((num_packs,), inter_node_penalty_factor, device=device, dtype=weight.dtype)
-#                 comm_penalties[is_intra_node_possible] = intra_node_penalty_factor
-#                 comm_penalties[is_retained_on_gpu] = 0.0
+#                 # Expand dims for broadcasting:
+#                 # all_target_gpus: [num_packs, 1]
+#                 # valid_old_gpus:  [1, num_replicas]
+#                 # all_target_nodes: [num_packs, 1]
+#                 # valid_old_nodes:  [1, num_replicas]
                 
-#                 comm_costs = comm_penalties * expert_weight
+#                 # Create a relationship matrix: [num_packs, num_replicas]
+#                 is_same_gpu_matrix = all_target_gpus.unsqueeze(1) == valid_old_gpus.unsqueeze(0)
+#                 is_same_node_matrix = all_target_nodes.unsqueeze(1) == valid_old_nodes.unsqueeze(0)
+                
+#                 # Create a penalty matrix based on the relationships
+#                 # Shape: [num_packs, num_replicas]
+#                 penalty_matrix = torch.full_like(is_same_node_matrix, 
+#                                                 inter_node_penalty_factor, 
+#                                                 device=device, dtype=weight.dtype)
+#                 penalty_matrix[is_same_node_matrix] = intra_node_penalty_factor
+#                 penalty_matrix[is_same_gpu_matrix] = 0.0
+                
+#                 # For each target GPU (row), find the minimum penalty from any old location (column)
+#                 # Shape: [num_packs]
+#                 min_penalties, _ = torch.min(penalty_matrix, dim=1)
+                
+#                 comm_costs = min_penalties * expert_weight
+#                 # --- CORRECTED LOGIC END ---
 
 #             # 3. Total Cost
 #             total_costs = load_costs + comm_costs
@@ -331,6 +347,10 @@ def balanced_packing_with_affinity_vectorized(
 #             total_costs[full_mask] = float('inf')
 
 #             # 5. Find the best pack
+#             # Check if all costs are inf to prevent argmin error on some torch versions
+#             if torch.all(full_mask):
+#                 # This should not happen if logic is correct, but as a safeguard
+#                 raise RuntimeError("All packs are full, but there are still experts to place.")
 #             best_pack = torch.argmin(total_costs).item()
 
 #             # --- End of Vectorized Cost Calculation ---
@@ -343,6 +363,7 @@ def balanced_packing_with_affinity_vectorized(
 #             pack_items_count[best_pack] += 1
             
 #     return pack_index, rank_in_pack
+
 
 def balanced_packing(
     weight: torch.Tensor, num_packs: int
