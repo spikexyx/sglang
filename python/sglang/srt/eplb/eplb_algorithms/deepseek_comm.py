@@ -136,13 +136,9 @@ def balanced_packing_with_affinity_vectorized(
     intra_node_penalty_factor: float = 0.2,
     inter_node_penalty_factor: float = 1.2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Optimized version using vectorization to speed up cost calculation.
-    """
     num_layers, num_groups = weight.shape
     assert num_groups % num_packs == 0
     groups_per_pack = num_groups // num_packs
-    # Assuming num_packs represents the total number of GPUs.
     gpus_per_node = num_packs // num_nodes
 
     if groups_per_pack == 1:
@@ -152,95 +148,85 @@ def balanced_packing_with_affinity_vectorized(
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
-    # Sort experts by weight (greedy strategy)
     indices = weight.float().sort(-1, descending=True).indices.cpu()
     
-    # Initialize output tensors on CPU
     pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
 
-    # Move all necessary data to CPU once to avoid repeated transfers
     weight_cpu = weight.cpu()
     phy2mlog_cpu = phy2mlog.cpu()
     old_log2phy_cpu = old_log2phy.cpu()
     
-    # Pre-calculate GPU and Node IDs for all packs
-    # This avoids repeated calculations inside the loop
     all_gpus = torch.arange(num_packs, dtype=torch.int64)
     all_nodes = all_gpus // gpus_per_node
 
     for i in range(num_layers):
-        # Use NumPy arrays for fast CPU computation. PyTorch CPU tensors are also fine.
         pack_weights = np.zeros(num_packs, dtype=np.float32)
         pack_items = np.zeros(num_packs, dtype=np.int32)
         
-        # Iterate through experts sorted by weight
         for expert_phy_id in indices[i]:
             expert_phy_id = expert_phy_id.item()
             expert_w = weight_cpu[i, expert_phy_id].item()
 
-            # --- Vectorized Cost Calculation ---
+            # --- Vectorized Cost Calculation (Corrected) ---
 
-            # 1. Load Cost: This is simply the current weight of all packs.
-            # Shape: (num_packs,)
+            # 1. Load Cost
             load_cost_vec = pack_weights
 
-            # 2. Communication Affinity Cost (Vectorized)
-            # Shape: (num_packs,)
-            comm_cost_vec = np.full(num_packs, float('inf'), dtype=np.float32)
-
+            # 2. Communication Affinity Cost
             logical_id = phy2mlog_cpu[i, expert_phy_id].item()
             old_phy_expert_indices = old_log2phy_cpu[i, logical_id]
             valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
             
+            # --- BUG FIX START ---
             if valid_old_phy_indices.numel() == 0:
-                # If the expert is new, assume the highest penalty for all locations
-                # This encourages balancing among the least loaded packs.
-                # A penalty of 0 might also be a valid choice if there's no affinity history.
-                comm_cost_vec.fill(inter_node_penalty_factor * expert_w)
+                # CORRECT: New experts have 0 communication penalty, matching original logic.
+                comm_cost_vec = np.zeros(num_packs, dtype=np.float32)
             else:
+                # IMPROVEMENT: Initialize with infinity to correctly find the minimum penalty.
+                comm_cost_vec = np.full(num_packs, float('inf'), dtype=np.float32)
+                
                 valid_old_gpus = valid_old_phy_indices // groups_per_pack
                 
-                # Default penalty is inter-node
-                comm_cost_vec.fill(inter_node_penalty_factor * expert_w)
-
-                # For each previous GPU, update the cost vector
                 for old_gpu in valid_old_gpus:
                     old_gpu = old_gpu.item()
                     old_node_id = old_gpu // gpus_per_node
                     
-                    # Calculate penalties for placing the expert on any GPU,
-                    # relative to this *one* old_gpu location.
-                    # is_intra_node is a boolean mask of shape (num_packs,)
                     is_intra_node = (all_nodes == old_node_id).numpy()
                     
-                    # current_penalties is a vector of shape (num_packs,)
+                    # Calculate potential penalties for moving from this *one* old_gpu
                     current_penalties = np.where(
                         is_intra_node, 
                         intra_node_penalty_factor * expert_w, 
                         inter_node_penalty_factor * expert_w
                     )
                     
-                    # We only care about the minimum penalty if the expert existed in multiple places
+                    # Update the communication cost by taking the element-wise minimum.
+                    # This correctly finds the minimum penalty for *each target GPU* across all possible source GPUs.
                     comm_cost_vec = np.minimum(comm_cost_vec, current_penalties)
 
-                # Set penalty to 0 for GPUs where the expert already was.
-                # This is the most preferred location.
+                # The most preferred locations (where the expert already was) have 0 penalty.
+                # This must be done after the loop to override any calculated penalties.
                 comm_cost_vec[valid_old_gpus.numpy()] = 0.0
+            # --- BUG FIX END ---
 
             # 3. Total Cost Vector
             total_cost_vec = load_cost_vec + comm_cost_vec
 
             # --- Find Best Pack ---
-            # Mask out packs that are already full
             available_mask = pack_items < groups_per_pack
             total_cost_vec[~available_mask] = float('inf')
             
-            # Find the pack with the minimum cost among available packs
+            # If all available packs have inf cost, argmin will still return 0.
+            # The subsequent assert handles this case.
+            if not np.any(available_mask):
+                # This should not happen if the logic is correct and num_groups is divisible by num_packs
+                raise RuntimeError("No available packs to place an expert. Check group/pack configuration.")
+
             best_pack = np.argmin(total_cost_vec)
 
             # --- Update State ---
-            assert pack_items[best_pack] < groups_per_pack
+            assert pack_items[best_pack] < groups_per_pack, f"Pack {best_pack} is already full!"
             pack_index[i, expert_phy_id] = best_pack
             rank_in_pack[i, expert_phy_id] = pack_items[best_pack]
             pack_weights[best_pack] += expert_w
