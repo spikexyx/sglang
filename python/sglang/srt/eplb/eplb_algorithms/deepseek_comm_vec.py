@@ -31,17 +31,155 @@ def pack_groups(tokens_per_group: torch.Tensor, num_nodes: int) -> torch.Tensor:
             node_groups[rank] += 1
     return ret
 
+def compute_communication_penalty(
+    current_phy_to_log: torch.Tensor,
+    old_log_to_phy_map: torch.Tensor,
+    num_chunks: int,
+    num_physical_experts_per_chunk: int,
+    num_nodes: int,
+    num_gpus: int,
+    intra_node_penalty: float,
+    inter_node_penalty: float
+) -> torch.Tensor:
+    num_layers = current_phy_to_log.shape[0]
+    num_gpus_per_node = num_gpus // num_nodes
+    
+    current_reshaped = current_phy_to_log.view(
+        num_layers, num_chunks, num_physical_experts_per_chunk
+    )
+    
+    penalty = torch.zeros_like(current_reshaped, dtype=torch.float32)
+    
+    for layer in range(num_layers):
+        for chunk in range(num_chunks):
+            for pos in range(num_physical_experts_per_chunk):
+                logical_id = current_reshaped[layer, chunk, pos].item()
+                
+                if logical_id >= 0:
+                    old_phy_positions = old_log_to_phy_map[layer, logical_id]
+                    # pass -1
+                    valid_old_positions = old_phy_positions[old_phy_positions >= 0]
+                    
+                    if len(valid_old_positions) > 0:
+                        current_phy_pos = chunk * num_physical_experts_per_chunk + pos
+                        
+                        if current_phy_pos not in valid_old_positions:
+                            min_penalty = float('inf')
+                            
+                            current_gpu = current_phy_pos % num_gpus
+                            current_node = current_gpu // num_gpus_per_node
+                            
+                            for old_phy_pos in valid_old_positions:
+                                old_gpu = old_phy_pos.item() % num_gpus
+                                old_node = old_gpu // num_gpus_per_node
+                                
+                                if current_node != old_node:
+                                    # inter node
+                                    move_penalty = inter_node_penalty
+                                else:
+                                    # intra node
+                                    move_penalty = intra_node_penalty
+                                
+                                min_penalty = min(min_penalty, move_penalty)
+                            
+                            penalty[layer, chunk, pos] = min_penalty
+    
+    return penalty
+
+def compute_communication_penalty_vectorized(
+    current_phy_to_log: torch.Tensor,
+    old_log_to_phy_map: torch.Tensor,
+    num_chunks: int,
+    num_physical_experts_per_chunk: int,
+    num_nodes: int,
+    num_gpus: int,
+    intra_node_penalty: float,
+    inter_node_penalty: float
+) -> torch.Tensor:
+    num_layers = current_phy_to_log.shape[0]
+    num_gpus_per_node = num_gpus // num_nodes
+    device = current_phy_to_log.device
+    
+    current_reshaped = current_phy_to_log.view(
+        num_layers, num_chunks, num_physical_experts_per_chunk
+    )
+    
+    penalty = torch.zeros_like(current_reshaped, dtype=torch.float32)
+    
+    chunk_indices = torch.arange(num_chunks, device=device)[:, None]
+    pos_indices = torch.arange(num_physical_experts_per_chunk, device=device)[None, :]
+    current_phy_positions = chunk_indices * num_physical_experts_per_chunk + pos_indices
+    current_phy_positions = current_phy_positions.unsqueeze(0).expand(num_layers, -1, -1)
+    
+    valid_mask = current_reshaped >= 0
+    
+    if valid_mask.any():
+        valid_layers, valid_chunks, valid_positions = torch.where(valid_mask)
+        valid_logical_ids = current_reshaped[valid_mask]
+        valid_current_phy_pos = current_phy_positions[valid_mask]
+        
+        valid_old_phy_maps = old_log_to_phy_map[valid_layers, valid_logical_ids]  # [N, X]
+        
+        penalties = []
+        for i in range(len(valid_logical_ids)):
+            layer_idx = valid_layers[i]
+            logical_id = valid_logical_ids[i]
+            current_phy_pos = valid_current_phy_pos[i]
+            
+            old_positions = valid_old_phy_maps[i]
+            valid_old_positions = old_positions[old_positions >= 0]
+            
+            if len(valid_old_positions) == 0:
+                penalties.append(0.0)
+                continue
+                
+            if current_phy_pos in valid_old_positions:
+                penalties.append(0.0)
+            else:
+                current_gpu = current_phy_pos % num_gpus
+                current_node = current_gpu // num_gpus_per_node
+                
+                old_gpus = valid_old_positions % num_gpus
+                old_nodes = old_gpus // num_gpus_per_node
+                
+                inter_node_moves = old_nodes != current_node
+                move_costs = torch.where(
+                    inter_node_moves,
+                    torch.tensor(inter_node_penalty, device=device),
+                    torch.tensor(intra_node_penalty, device=device)
+                )
+                
+                penalties.append(move_costs.min().item())
+        
+        penalty[valid_mask] = torch.tensor(penalties, dtype=torch.float32, device=device)
+    
+    return penalty
+
+def normalize_score(score: torch.Tensor) -> torch.Tensor:
+    score_flat = score.view(-1, score.shape[-1])
+    min_vals = score_flat.min(dim=-1, keepdim=True)[0]
+    max_vals = score_flat.max(dim=-1, keepdim=True)[0]
+    
+    range_vals = max_vals - min_vals
+    range_vals = torch.where(range_vals == 0, torch.ones_like(range_vals), range_vals)
+    
+    normalized = (score_flat - min_vals) / range_vals
+    return normalized.view_as(score)
+
 
 def make_redundant_experts_chunkwise(
     tokens_per_expert: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
     num_physical_experts_per_chunk: int,
-    num_nodes: int, 
+    # New args
+    num_nodes: int,
     num_gpus: int,
     old_phy_to_log_map: Optional[torch.Tensor] = None,
+    old_log_to_phy_map: Optional[torch.Tensor] = None,
+    comm_weight: float = 0.2,
     intra_node_penalty: float = 0.5,
-    inter_node_penalty: float = 5.0,
+    inter_node_penalty: float = 5.0
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_steps, num_moe_layers, num_logical_experts = tokens_per_expert.shape
     num_redundancy_experts = num_physical_experts - num_logical_experts
@@ -146,442 +284,81 @@ def make_redundant_experts_chunkwise(
             redundancy_indices.view(num_moe_layers * num_chunks),
         ] += 1
 
-    if num_local_physical_experts > 1 and old_phy_to_log_map is not None:
-        # This is the cost-aware load-balancing logic
-        
-        # 1. Pre-calculate physical location info for each expert slot
-        # This is done once and is very fast
-        # num_gpus = num_physical_experts // num_local_physical_experts
-        gpus_per_node = num_gpus // num_nodes
-        
-        phys_expert_indices = torch.arange(num_physical_experts, device=tokens_per_expert.device)
-        gpu_ids = phys_expert_indices // num_local_physical_experts
-        node_ids = gpu_ids // gpus_per_node
+    if num_local_physical_experts > 1:
+        # Load-balancing between GPUs
+        physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
+        counts = logical_count.gather(-1, physical_to_logical_map_int64)
+        score = tokens_per_expert.sum(0).gather(-1, physical_to_logical_map_int64)
+        # score = score / counts
+        # score = score.view(num_moe_layers, num_chunks, num_physical_experts_per_chunk)
+        load_score = score / counts
+        load_score = load_score.view(num_moe_layers, num_chunks, num_physical_experts_per_chunk)
 
-        # 2. Calculate the base load score, same as original code
-        # `physical_to_logical_map` here is the "target map" before final placement
-        target_phy_to_log_map = physical_to_logical_map.to(torch.int64)
-        counts = logical_count.gather(-1, target_phy_to_log_map)
-        base_score = tokens_per_expert.sum(0).gather(-1, target_phy_to_log_map)
-        base_score = base_score / counts  # Shape: [num_moe_layers, num_physical_experts]
-
-        # 3. Create the Communication Cost/Benefit Matrix
-        # We want to calculate Benefit[l, i, j]: 
-        # the benefit of assigning the i-th target expert to the j-th physical slot.
-        # Shape: [num_moe_layers, num_physical_experts, num_physical_experts]
-        
-        # Expand old and new maps for broadcasting
-        # target_log_experts[l, i, j] is the logical expert of the i-th target
-        target_log_experts = target_phy_to_log_map.unsqueeze(2).expand(-1, -1, num_physical_experts)
-        # old_log_experts_at_slot[l, i, j] is the logical expert that was at physical slot j
-        old_log_experts_at_slot = old_phy_to_log_map.unsqueeze(1).expand(-1, num_physical_experts, -1)
-        
-        # Find where the target expert *used to be*
-        # old_slots_of_target_expert[l, i, k] is the k-th old physical slot of the i-th target expert
-        old_slots_of_target_expert = (old_phy_to_log_map.unsqueeze(1) == target_phy_to_log_map.unsqueeze(2)).int()
-
-        # Calculate node locations for all old slots
-        old_node_ids_of_slots = node_ids.expand(num_moe_layers, num_physical_experts)
-        
-        # For each target expert, what nodes was it on previously?
-        # A bit of einsum magic to check presence: 1 if target_i was on node_k, 0 otherwise
-        target_on_old_node = torch.einsum(
-            'lij,jk->lik', 
-            old_slots_of_target_expert.float(), 
-            torch.nn.functional.one_hot(node_ids, num_nodes).float()
-        ) > 0 # Shape: [num_layers, num_targets, num_nodes]
-
-        # Calculate communication penalty
-        # penalty[l, i, j] = penalty for moving target_i to physical_slot_j
-        current_node_of_slot_j = node_ids.view(1, 1, -1) # Shape: [1, 1, num_physical_experts]
-        is_on_different_node = (1.0 - target_on_old_node.gather(2, current_node_of_slot_j.expand(num_moe_layers, num_physical_experts, -1)).float())
-        # Note: This simple model assumes if an expert needs to move to a new node,
-        # it will incur the inter_node_penalty. A more complex model could calculate min distance.
-        # For simplicity and performance, we check if the target node is one of the source nodes.
-        
-        # A simpler check: does the assignment match exactly?
-        is_same_logical_expert = (target_log_experts == old_log_experts_at_slot)
-        
-        # Let's use a clear penalty definition:
-        # If logical expert is the same, penalty is 0.
-        # If different, but a copy of the target expert exists on the destination node, penalty is intra_node.
-        # If no copy exists on the destination node, penalty is inter_node.
-        
-        # We can approximate this with a bonus for staying put
-        comm_bonus = torch.zeros_like(base_score).unsqueeze(1).expand(-1, num_physical_experts, -1)
-        
-        # Bonus for exact match (staying in the same slot)
-        # Find where target expert `i` matches an old expert `j`
-        bonus_mask = (target_phy_to_log_map.unsqueeze(2) == old_phy_to_log_map.unsqueeze(1))
-        # We give the max penalty (inter_node_penalty) as a bonus for staying put
-        comm_bonus[bonus_mask] = inter_node_penalty * base_score.mean() # Scale bonus by avg score
-
-        # 4. Create the final combined benefit matrix
-        # benefit[i, j] = benefit of assigning target i to physical slot j
-        # We normalize score to be comparable to penalties
-        normalized_score = base_score / (base_score.mean() + 1e-6)
-        
-        # The benefit matrix combines load and communication bonus
-        # Benefit[l, i, j] = score of target i + bonus of placing target i in slot j
-        benefit_matrix = normalized_score.unsqueeze(2) + comm_bonus
-
-        # 5. Greedy assignment using the benefit matrix
-        # We iteratively assign the best remaining target to the best remaining slot.
-        final_phy_to_log_map = torch.full_like(physical_to_logical_map, -1)
-        
-        # To make this fast and vectorized, we find the max benefit pairs and assign them,
-        # then mask them out and repeat. This is a greedy approximation.
-        temp_benefit = benefit_matrix.clone()
-        
-        # `indices` will map from the new physical slot to the *index* of the target expert
-        indices = torch.full((num_moe_layers, num_physical_experts), -1, dtype=torch.long, device=benefit_matrix.device)
-        
-        for _ in range(num_physical_experts):
-            # Find the highest remaining benefit pair (target_idx, slot_idx)
-            max_val, flat_idx = temp_benefit.view(num_moe_layers, -1).max(dim=1)
-            target_indices = flat_idx // num_physical_experts
-            slot_indices = flat_idx % num_physical_experts
-
-            # Perform the assignment
-            # Get the actual logical expert ID from the original target map
-            assigned_logical_expert = physical_to_logical_map.gather(1, target_indices.unsqueeze(1)).squeeze(1)
-            final_phy_to_log_map.scatter_(1, slot_indices.unsqueeze(1), assigned_logical_expert.unsqueeze(1).int())
-            
-            # Record which target was assigned to which new slot, for log_to_phy_map update
-            indices.scatter_(1, slot_indices.unsqueeze(1), target_indices.unsqueeze(1))
-            
-            # Mask out the used target and slot to prevent re-assignment
-            temp_benefit.scatter_(1, target_indices.unsqueeze(1).expand(-1, -1, num_physical_experts), -1e9)
-            temp_benefit.scatter_(2, slot_indices.unsqueeze(1).unsqueeze(2).expand(-1, num_physical_experts, -1, -1).squeeze(2), -1e9)
-
-        physical_to_logical_map = final_phy_to_log_map
-        
-        # 6. Update logical_to_physical_map based on the new assignment
-        # The original `indices` from argsort is now our computed `indices`.
-        # We need to compute its inverse to update log_to_phy_map correctly.
-        mask = logical_to_physical_map == -1
-        logical_to_physical_map[mask] = 0 # Temporarily fill for gather
-        
-        # `indices` tells us: new_slot -> old_target_index
-        # We need `argsort` for the inverse: old_target_index -> new_slot
-        inverse_indices = indices.argsort(-1)
-        
-        logical_to_physical_map = inverse_indices.gather(
-            -1, logical_to_physical_map.view(num_moe_layers, -1).to(torch.int64)
-        ).view_as(logical_to_physical_map).to(torch.int)
-        
-        logical_to_physical_map[mask] = -1 # Restore mask
-
-    else:
-        # Fallback to original logic if cost-aware inputs are not provided
-        if num_local_physical_experts > 1:
-            # Load-balancing between GPUs
-            physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
-            counts = logical_count.gather(-1, physical_to_logical_map_int64)
-            score = tokens_per_expert.sum(0).gather(-1, physical_to_logical_map_int64)
-            score = score / counts
-            score = score.view(num_moe_layers, num_chunks, num_physical_experts_per_chunk)
-            indices = score.argsort(-1, descending=True)
-            indices += torch.arange(
-                0,
-                num_physical_experts,
+        # Add communication into consideration
+        if old_log_to_phy_map is not None:
+            comm_penalty = compute_communication_penalty(
+                physical_to_logical_map,
+                old_log_to_phy_map,
+                num_chunks,
                 num_physical_experts_per_chunk,
-                dtype=indices.dtype,
-                device=indices.device,
-            )[None, :, None]
+                num_nodes,
+                num_gpus,
+                intra_node_penalty,
+                inter_node_penalty
+            )
 
-            assert num_physical_experts_per_chunk % num_local_physical_experts == 0
-            num_local_groups = num_physical_experts_per_chunk // num_local_physical_experts
-            indices = indices.view(
-                num_moe_layers, num_chunks, num_local_physical_experts, num_local_groups
+            normalized_load = normalize_score(load_score)
+            normalized_comm = normalize_score(-comm_penalty)
+
+            combined_score = (1 - comm_weight) * normalized_load + comm_weight * normalized_comm
+            indices = combined_score.argsort(-1, descending=True)
+        else:
+            indices = load_score.argsort(-1, descending=True)
+
+        # indices = score.argsort(-1, descending=True)
+        indices += torch.arange(
+            0,
+            num_physical_experts,
+            num_physical_experts_per_chunk,
+            dtype=indices.dtype,
+            device=indices.device,
+        )[None, :, None]
+
+        assert num_physical_experts_per_chunk % num_local_physical_experts == 0
+        num_local_groups = num_physical_experts_per_chunk // num_local_physical_experts
+        indices = indices.view(
+            num_moe_layers, num_chunks, num_local_physical_experts, num_local_groups
+        )
+        indices[:, :, 1::2, :] = indices[:, :, 1::2, :].flip(-1)
+        indices = indices.transpose(2, 3)
+        indices = indices.reshape(num_moe_layers, num_physical_experts)
+        physical_to_logical_map = physical_to_logical_map.gather(-1, indices)
+        mask = logical_to_physical_map == -1
+        logical_to_physical_map[mask] = 0
+        logical_to_physical_map = (
+            indices.argsort(-1)
+            .gather(
+                -1, logical_to_physical_map.view(num_moe_layers, -1).to(torch.int64)
             )
-            indices[:, :, 1::2, :] = indices[:, :, 1::2, :].flip(-1)
-            indices = indices.transpose(2, 3)
-            indices = indices.reshape(num_moe_layers, num_physical_experts)
-            physical_to_logical_map = physical_to_logical_map.gather(-1, indices)
-            mask = logical_to_physical_map == -1
-            logical_to_physical_map[mask] = 0
-            logical_to_physical_map = (
-                indices.argsort(-1)
-                .gather(
-                    -1, logical_to_physical_map.view(num_moe_layers, -1).to(torch.int64)
-                )
-                .view_as(logical_to_physical_map)
-                .to(torch.int)
-            )
-            logical_to_physical_map[mask] = -1
+            .view_as(logical_to_physical_map)
+            .to(torch.int)
+        )
+        logical_to_physical_map[mask] = -1
 
     return physical_to_logical_map, logical_to_physical_map, logical_count
 
-# def make_redundant_experts_chunkwise(
-#     tokens_per_expert: torch.Tensor,
-#     num_physical_experts: int,
-#     num_local_physical_experts: int,
-#     num_physical_experts_per_chunk: int,
-#     num_nodes: int, 
-#     num_gpus: int,
-#     old_phy_to_log_map: Optional[torch.Tensor] = None,
-#     intra_node_penalty: float = 0.5,
-#     inter_node_penalty: float = 5.0,
-# ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#     num_steps, num_moe_layers, num_logical_experts = tokens_per_expert.shape
-#     num_redundancy_experts = num_physical_experts - num_logical_experts
-
-#     physical_to_logical_map = torch.empty(
-#         num_moe_layers,
-#         num_physical_experts,
-#         dtype=torch.int,
-#         device=tokens_per_expert.device,
-#     )
-#     logical_to_physical_map = torch.full(
-#         (num_moe_layers, num_logical_experts, num_redundancy_experts + 1),
-#         -1,
-#         dtype=torch.int,
-#         device=tokens_per_expert.device,
-#     )
-#     logical_count = torch.ones(
-#         num_moe_layers,
-#         num_logical_experts,
-#         dtype=torch.int,
-#         device=tokens_per_expert.device,
-#     )
-
-#     assert num_physical_experts % num_physical_experts_per_chunk == 0
-#     num_chunks = num_physical_experts // num_physical_experts_per_chunk
-#     assert num_logical_experts % num_chunks == 0
-#     num_logical_experts_per_group = num_logical_experts // num_chunks
-#     assert num_redundancy_experts % num_chunks == 0
-#     num_redundancy_experts_per_group = num_redundancy_experts // num_chunks
-
-#     arange_num_moe_layers_num_groups = torch.arange(
-#         num_moe_layers * num_chunks, dtype=torch.int, device=tokens_per_expert.device
-#     )
-#     arange_num_logical_experts = torch.arange(
-#         num_logical_experts, dtype=torch.int, device=tokens_per_expert.device
-#     )
-#     arange_num_logical_experts_per_group = torch.arange(
-#         num_logical_experts_per_group, dtype=torch.int, device=tokens_per_expert.device
-#     )
-#     arange_num_groups = torch.arange(
-#         num_chunks, dtype=torch.int, device=tokens_per_expert.device
-#     )
-#     physical_to_logical_map.view(
-#         num_moe_layers, num_chunks, num_physical_experts_per_chunk
-#     )[:, :, :num_logical_experts_per_group] = arange_num_logical_experts.view(
-#         num_chunks, num_logical_experts_per_group
-#     )
-#     logical_to_physical_map[:, :, 0] = (
-#         arange_num_logical_experts_per_group.expand(
-#             num_chunks, num_logical_experts_per_group
-#         )
-#         + arange_num_groups[:, None] * num_physical_experts_per_chunk
-#     ).view(num_logical_experts)
-
-#     tokens_per_expert_all_diff = tokens_per_expert + arange_num_logical_experts * 1e-4
-#     for i in range(num_redundancy_experts_per_group):
-#         score = (
-#             tokens_per_expert_all_diff / logical_count
-#         )  # NOTE: Values in score must be different from each other
-#         score1 = tokens_per_expert / (logical_count + 1)
-#         score = score.view(
-#             num_steps, num_moe_layers, num_chunks, num_logical_experts_per_group
-#         )
-#         score1 = score1.view_as(score)
-#         values, indices = score.max(-1, keepdim=True)
-#         values = values.expand_as(score).contiguous()
-#         score.scatter_(-1, indices, score1.gather(-1, indices))
-#         values.scatter_(-1, indices, score.max(-1, keepdim=True).values)
-#         redundancy_indices = values.sum(0).argmin(-1)
-#         physical_to_logical_map.view(
-#             num_moe_layers, num_chunks, num_physical_experts_per_chunk
-#         )[:, :, num_logical_experts_per_group + i] = (
-#             redundancy_indices + arange_num_groups * num_logical_experts_per_group
-#         )
-#         redundancy_count = (
-#             logical_count.view(
-#                 num_moe_layers * num_chunks, num_logical_experts_per_group
-#             )
-#             .gather(-1, redundancy_indices.view(num_moe_layers * num_chunks, 1))
-#             .squeeze(1)
-#         )
-#         physical_redundancy_indices = (
-#             (
-#                 arange_num_groups * num_physical_experts_per_chunk
-#                 + num_logical_experts_per_group
-#                 + i
-#             )
-#             .expand(num_moe_layers, num_chunks)
-#             .flatten()
-#         )
-#         logical_to_physical_map.view(
-#             num_moe_layers * num_chunks,
-#             num_logical_experts_per_group,
-#             num_redundancy_experts + 1,
-#         )[
-#             arange_num_moe_layers_num_groups,
-#             redundancy_indices.view(num_moe_layers * num_chunks),
-#             redundancy_count,
-#         ] = physical_redundancy_indices
-#         logical_count.view(num_moe_layers * num_chunks, num_logical_experts_per_group)[
-#             arange_num_moe_layers_num_groups,
-#             redundancy_indices.view(num_moe_layers * num_chunks),
-#         ] += 1
-
-#     if num_local_physical_experts > 1 and old_phy_to_log_map is not None:
-#         # 1. Pre-calculate physical location info
-#         # num_gpus = num_physical_experts // num_local_physical_experts
-#         gpus_per_node = num_gpus // num_nodes
-#         phys_expert_indices = torch.arange(num_physical_experts, device=tokens_per_expert.device)
-#         node_ids = (phys_expert_indices // num_local_physical_experts) // gpus_per_node
-
-#         # 2. Calculate the base load score for each potential target expert
-#         target_phy_to_log_map = physical_to_logical_map.to(torch.int64)
-#         counts = logical_count.gather(-1, target_phy_to_log_map)
-#         base_score = tokens_per_expert.sum(0).gather(-1, target_phy_to_log_map)
-#         base_score = base_score / (counts + 1e-8)  # Shape: [num_moe_layers, num_physical_experts]
-
-#         # 3. Create the Communication Bonus Matrix directly
-#         # Goal: bonus[l, i, j] = bonus for assigning target_expert_i to physical_slot_j
-        
-#         # Expand maps for broadcasting.
-#         # target_log_experts[l, i] is the logical expert ID of the i-th target.
-#         target_log_experts = target_phy_to_log_map # Shape: [L, I]
-#         # old_log_experts_at_slot[l, j] is the logical expert ID that was at physical slot j.
-#         old_log_experts_at_slot = old_phy_to_log_map # Shape: [L, J]
-
-#         # Calculate bonus for "no-move" (highest reward)
-#         # bonus_mask[l, i, j] is true if target_i's log_id == old log_id at slot j.
-#         bonus_mask_no_move = target_log_experts.unsqueeze(2) == old_log_experts_at_slot.unsqueeze(1)
-        
-#         # Scale penalties to be comparable to scores
-#         # score_mean = base_score.mean([-1], keepdim=True) + 1e-8
-#         # scaled_inter_penalty = inter_node_penalty * score_mean
-#         # scaled_intra_penalty = intra_node_penalty * score_mean
-
-#         score_mean_per_layer = base_score.mean([-1], keepdim=True) + 1e-8 # Shape: [L, 1]
-#         scaled_inter_penalty = inter_node_penalty * score_mean_per_layer.unsqueeze(-1)
-#         scaled_intra_penalty = intra_node_penalty * score_mean_per_layer.unsqueeze(-1)
-
-#         # expanded_inter_penalty = scaled_inter_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
-#         # expanded_intra_penalty = scaled_intra_penalty.unsqueeze(-1).expand(-1, -1, num_physical_experts)
-
-#         comm_bonus = torch.zeros(
-#             num_moe_layers, num_physical_experts, num_physical_experts, 
-#             device=base_score.device
-#         )
-#         comm_bonus[bonus_mask_no_move] = scaled_inter_penalty.expand_as(comm_bonus)[bonus_mask_no_move]
-#         # comm_bonus[bonus_mask_no_move] = scaled_inter_penalty
-#         # comm_bonus = torch.where(
-#         #     bonus_mask_intra_node, 
-#         #     expanded_intra_penalty, 
-#         #     comm_bonus
-#         # )
-#         # comm_bonus = torch.where(
-#         #     bonus_mask_no_move, 
-#         #     expanded_inter_penalty, 
-#         #     comm_bonus
-#         # )
-
-#         # Calculate bonus for "intra-node move" (secondary reward)
-#         # First, find which nodes each logical expert previously occupied.
-#         old_log_on_node = torch.zeros(num_moe_layers, num_logical_experts, num_nodes, device=base_score.device)
-#         old_log_on_node.scatter_add_(
-#             2,
-#             node_ids.view(1, 1, -1).expand(num_moe_layers, num_logical_experts, -1),
-#             (old_log_experts_at_slot.unsqueeze(1) == torch.arange(num_logical_experts, device=base_score.device).view(1, -1, 1)).float()
-#         )
-#         old_log_on_node = old_log_on_node > 0 # Shape: [L, num_log_exp, num_nodes]
-
-#         # For each target expert i, check if it was on the node of physical slot j
-#         target_was_on_node_j = old_log_on_node.gather(
-#             1, target_log_experts.unsqueeze(2).expand(-1, -1, num_nodes).to(torch.int64)
-#         ).gather(
-#             2, node_ids.view(1, 1, -1).expand(num_moe_layers, num_physical_experts, -1)
-#         ) # Shape: [L, I, J]
-        
-#         bonus_mask_intra_node = target_was_on_node_j & (~bonus_mask_no_move)
-#         comm_bonus[bonus_mask_intra_node] = scaled_intra_penalty.expand_as(comm_bonus)[bonus_mask_intra_node]
-
-#         # 4. Create the final combined benefit matrix
-#         benefit_matrix = base_score.unsqueeze(2) + comm_bonus
-
-#         # 5. Greedy assignment
-#         final_phy_to_log_map = torch.full_like(physical_to_logical_map, -1)
-#         indices = torch.full((num_moe_layers, num_physical_experts), -1, dtype=torch.long, device=benefit_matrix.device)
-#         temp_benefit = benefit_matrix.clone()
-
-#         for _ in range(num_physical_experts):
-#             max_val, flat_idx = temp_benefit.view(num_moe_layers, -1).max(dim=1)
-#             target_indices = flat_idx // num_physical_experts
-#             slot_indices = flat_idx % num_physical_experts
-            
-#             assigned_logical_expert = physical_to_logical_map.gather(1, target_indices.unsqueeze(1)).squeeze(1)
-#             final_phy_to_log_map.scatter_(1, slot_indices.unsqueeze(1), assigned_logical_expert.unsqueeze(1).int())
-#             indices.scatter_(1, slot_indices.unsqueeze(1), target_indices.unsqueeze(1))
-            
-#             temp_benefit[:, target_indices, :] = -1e9
-#             temp_benefit[:, :, slot_indices] = -1e9
-
-#         physical_to_logical_map = final_phy_to_log_map
-        
-#         # 6. Update logical_to_physical_map
-#         mask = logical_to_physical_map == -1
-#         logical_to_physical_map[mask] = 0
-#         inverse_indices = indices.argsort(-1)
-#         logical_to_physical_map = inverse_indices.gather(
-#             -1, logical_to_physical_map.view(num_moe_layers, -1).to(torch.int64)
-#         ).view_as(logical_to_physical_map).to(torch.int)
-#         logical_to_physical_map[mask] = -1
-#     else:
-#         # Fallback to original logic if cost-aware inputs are not provided
-#         if num_local_physical_experts > 1:
-#             # Load-balancing between GPUs
-#             physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
-#             counts = logical_count.gather(-1, physical_to_logical_map_int64)
-#             score = tokens_per_expert.sum(0).gather(-1, physical_to_logical_map_int64)
-#             score = score / counts
-#             score = score.view(num_moe_layers, num_chunks, num_physical_experts_per_chunk)
-#             indices = score.argsort(-1, descending=True)
-#             indices += torch.arange(
-#                 0,
-#                 num_physical_experts,
-#                 num_physical_experts_per_chunk,
-#                 dtype=indices.dtype,
-#                 device=indices.device,
-#             )[None, :, None]
-
-#             assert num_physical_experts_per_chunk % num_local_physical_experts == 0
-#             num_local_groups = num_physical_experts_per_chunk // num_local_physical_experts
-#             indices = indices.view(
-#                 num_moe_layers, num_chunks, num_local_physical_experts, num_local_groups
-#             )
-#             indices[:, :, 1::2, :] = indices[:, :, 1::2, :].flip(-1)
-#             indices = indices.transpose(2, 3)
-#             indices = indices.reshape(num_moe_layers, num_physical_experts)
-#             physical_to_logical_map = physical_to_logical_map.gather(-1, indices)
-#             mask = logical_to_physical_map == -1
-#             logical_to_physical_map[mask] = 0
-#             logical_to_physical_map = (
-#                 indices.argsort(-1)
-#                 .gather(
-#                     -1, logical_to_physical_map.view(num_moe_layers, -1).to(torch.int64)
-#                 )
-#                 .view_as(logical_to_physical_map)
-#                 .to(torch.int)
-#             )
-#             logical_to_physical_map[mask] = -1
-
-#     return physical_to_logical_map, logical_to_physical_map, logical_count
 
 def decode_rebalance_experts(
     tokens_per_expert: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
-    num_nodes: int, 
+    num_nodes: int,
     num_gpus: int,
     old_phy_to_log_map: Optional[torch.Tensor] = None,
+    old_log_to_phy_map: Optional[torch.Tensor] = None,
+    comm_weight: float = 0.2,
     intra_node_penalty: float = 0.5,
-    inter_node_penalty: float = 5.0,
+    inter_node_penalty: float = 5.0
 ):
     return make_redundant_experts_chunkwise(
         tokens_per_expert,
@@ -591,6 +368,8 @@ def decode_rebalance_experts(
         num_nodes,
         num_gpus,
         old_phy_to_log_map,
+        old_log_to_phy_map,
+        comm_weight,
         intra_node_penalty,
         inter_node_penalty
     )
@@ -663,7 +442,7 @@ def rebalance_experts(
     num_gpus: int,
     enable_hierarchical: bool,
     intra_node_penalty: float,
-    inter_node_penalty: float,
+    inter_node_penalty: float
 ):
     if enable_hierarchical:
         return prefill_rebalance_experts(
@@ -675,10 +454,10 @@ def rebalance_experts(
         )
     else:
         from sglang.srt.eplb.expert_location import (
-            ExpertLocationMetadata,
             get_global_expert_location_metadata,
         )
         old_phy_to_log_map = get_global_expert_location_metadata().physical_to_logical_map
+        old_log_to_phy_map = get_global_expert_location_metadata().logical_to_all_physical_map
         return decode_rebalance_experts(
             tokens_per_expert=tokens_per_expert,
             num_physical_experts=num_physical_experts,
@@ -686,6 +465,8 @@ def rebalance_experts(
             num_nodes=num_nodes,
             num_gpus=num_gpus,
             old_phy_to_log_map=old_phy_to_log_map,
+            old_log_to_phy_map=old_log_to_phy_map,
+            comm_weight=0.2,
             intra_node_penalty=intra_node_penalty,
             inter_node_penalty=inter_node_penalty
         )
