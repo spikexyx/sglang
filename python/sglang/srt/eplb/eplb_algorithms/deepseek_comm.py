@@ -74,6 +74,7 @@ def balanced_packing_with_affinity(
     phy2mlog: torch.Tensor, 
     old_log2phy: torch.Tensor, 
     num_nodes: int,
+    num_gpus: int,
     intra_node_penalty_factor: float = 0.2,
     inter_node_penalty_factor: float = 1.2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -137,12 +138,8 @@ def precompute_communication_penalties(
     groups_per_pack: int,
     intra_node_penalty_factor: float,
     inter_node_penalty_factor: float,
-    weight_cpu: torch.Tensor
+    weight_cpu: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    预计算所有expert到所有pack的通信惩罚
-    Returns: [num_groups, num_packs] 通信惩罚矩阵
-    """
     comm_penalties = torch.zeros((num_groups, num_packs), dtype=torch.float32)
     
     # 获取当前层的映射关系
@@ -194,6 +191,7 @@ def balanced_packing_with_affinity_vectorized(
     phy2mlog: torch.Tensor, 
     old_log2phy: torch.Tensor, 
     num_nodes: int,
+    num_gpus: int,
     intra_node_penalty_factor: float = 0.2,
     inter_node_penalty_factor: float = 1.2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -224,7 +222,7 @@ def balanced_packing_with_affinity_vectorized(
         # 预计算通信惩罚矩阵
         comm_penalties = precompute_communication_penalties(
             layer_id, num_groups, num_packs, phy2mlog_cpu, old_log2phy_cpu,
-            packs_per_node, groups_per_pack, intra_node_penalty_factor, 
+            num_gpus // num_nodes, groups_per_pack, intra_node_penalty_factor, 
             inter_node_penalty_factor, weight_cpu
         )
         
@@ -428,7 +426,6 @@ def balanced_packing(
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
-
 def replicate_experts(
     weight: torch.Tensor, num_phy: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -459,101 +456,6 @@ def replicate_experts(
         logcnt[arangen, redundant_indices] += 1
     return phy2log, rank, logcnt
 
-
-def rebalance_experts_hierarchical(
-    weight: torch.Tensor,
-    num_physical_experts: int,
-    num_groups: int,
-    num_nodes: int,
-    num_gpus: int,
-    intra_node_penalty_factor: float = 0.2,
-    inter_node_penalty_factor: float = 1.2
-):
-    """
-    Parameters:
-        weight: [num_moe_layers, num_logical_experts]
-        num_physical_experts: number of physical experts after replication
-        num_groups: number of expert groups
-        num_nodes: number of server nodes, where the intra-node network (e.g, NVLink) is faster
-        num_gpus: number of GPUs, must be a multiple of `num_nodes`
-
-    Returns:
-        physical_to_logical_map: [num_moe_layers, num_physical_experts]
-        logical_to_physical_map: [num_moe_layers, num_logical_experts, X]
-        logical_count: [num_moe_layers, num_logical_experts]
-    """
-    from sglang.srt.eplb.expert_location import (
-        ExpertLocationMetadata,
-        get_global_expert_location_metadata,
-    )
-    num_layers, num_logical_experts = weight.shape
-    assert num_logical_experts % num_groups == 0
-    group_size = num_logical_experts // num_groups
-    assert num_groups % num_nodes == 0
-    groups_per_node = num_groups // num_nodes
-    assert num_gpus % num_nodes == 0
-    assert num_physical_experts % num_gpus == 0
-    phy_experts_per_gpu = num_physical_experts // num_gpus
-
-    old_ep_metadata = get_global_expert_location_metadata()
-    old_log2phy = old_ep_metadata.logical_to_all_physical_map
-
-    def inverse(perm: torch.Tensor) -> torch.Tensor:
-        inv = torch.empty_like(perm)
-        inv.scatter_(
-            1,
-            perm,
-            torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(
-                perm.shape
-            ),
-        )
-        return inv
-
-    # Step 1: pack groups to nodes
-    tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
-    group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)
-    log2mlog = (
-        (
-            (group_pack_index * groups_per_node + group_rank_in_pack) * group_size
-        ).unsqueeze(-1)
-        + torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)
-    ).flatten(-2)
-    mlog2log = inverse(log2mlog)
-
-    # Step 2: construct redundant experts within nodes
-    # [num_layers * num_nodes, num_logical_experts // num_nodes]
-    tokens_per_mlog = weight.gather(-1, mlog2log).view(
-        -1, num_logical_experts // num_nodes
-    )
-    phy2mlog, phyrank, mlogcnt = replicate_experts(
-        tokens_per_mlog, num_physical_experts // num_nodes
-    )
-
-    # Step 3: pack physical_experts to GPUs
-    # [num_layers * num_nodes, num_physical_experts // num_nodes]
-    tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, intra_node_penalty_factor, inter_node_penalty_factor)
-    phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
-    pphy2phy = inverse(phy2pphy)
-
-    pphy2mlog = phy2mlog.gather(
-        -1, pphy2phy
-    )  # [num_layers * num_nodes, num_log_per_nodes]
-    pphy2mlog = (
-        pphy2mlog.view(num_layers, num_nodes, -1)
-        + torch.arange(
-            0,
-            num_logical_experts,
-            num_logical_experts // num_nodes,
-            device=group_pack_index.device,
-        ).view(1, -1, 1)
-    ).flatten(-2)
-    pphy2log = mlog2log.gather(-1, pphy2mlog)
-    pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)
-    logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
-    return pphy2log, pphyrank, logcnt
-
-
 def rebalance_experts_with_affinity(
     weight: torch.Tensor,
     num_physical_experts: int,
@@ -579,7 +481,7 @@ def rebalance_experts_with_affinity(
         logical_count: [num_moe_layers, num_logical_experts]
     """
     from sglang.srt.eplb.expert_location import (
-        ExpertLocationMetadata,
+        # ExpertLocationMetadata,
         get_global_expert_location_metadata,
     )
     num_layers, num_logical_experts = weight.shape
@@ -628,7 +530,7 @@ def rebalance_experts_with_affinity(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
@@ -678,16 +580,12 @@ def rebalance_experts(
 
     num_layers, num_logical_experts = weight.shape
     weight = weight.float().cpu()
-    if enable_hierarchical:
-        # use hierarchical load-balance policy
-        phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
-            weight, num_replicas, num_groups, num_nodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor
-        )
-    else:
-        # use global load-balance policy with affinity
-        phy2log, phyrank, logcnt = rebalance_experts_with_affinity(
-            weight, num_replicas, 1, 1, num_gpus, num_nodes, intra_node_penalty_factor, inter_node_penalty_factor
-        )
+    
+    # use global load-balance policy with affinity
+    phy2log, phyrank, logcnt = rebalance_experts_with_affinity(
+        weight, num_replicas, 1, 1, num_gpus, num_nodes, intra_node_penalty_factor, inter_node_penalty_factor
+    )
+
     maxlogcnt = logcnt.max().item()
     log2phy: torch.Tensor = torch.full(
         (num_layers, num_logical_experts, maxlogcnt),
