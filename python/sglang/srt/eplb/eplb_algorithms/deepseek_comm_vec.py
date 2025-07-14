@@ -186,7 +186,7 @@ def make_redundant_experts_chunkwise(
         # For each target expert, what nodes was it on previously?
         # A bit of einsum magic to check presence: 1 if target_i was on node_k, 0 otherwise
         target_on_old_node = torch.einsum(
-            'lij,lj->lik', 
+            'lij,jk->lik', 
             old_slots_of_target_expert.float(), 
             torch.nn.functional.one_hot(node_ids, num_nodes).float()
         ) > 0 # Shape: [num_layers, num_targets, num_nodes]
