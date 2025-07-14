@@ -127,6 +127,67 @@ def balanced_packing_with_affinity(
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
+def precompute_communication_penalties(
+    layer_id: int,
+    num_groups: int,
+    num_packs: int,
+    phy2mlog: torch.Tensor,
+    old_log2phy: torch.Tensor,
+    gpus_per_node: int,
+    groups_per_pack: int,
+    intra_node_penalty_factor: float,
+    inter_node_penalty_factor: float,
+    weight_cpu: torch.Tensor
+) -> torch.Tensor:
+    """
+    预计算所有expert到所有pack的通信惩罚
+    Returns: [num_groups, num_packs] 通信惩罚矩阵
+    """
+    comm_penalties = torch.zeros((num_groups, num_packs), dtype=torch.float32)
+    
+    # 获取当前层的映射关系
+    layer_phy2mlog = phy2mlog[layer_id]  # [num_groups]
+    layer_old_log2phy = old_log2phy[layer_id]  # [logical_experts, groups_per_pack]
+    
+    for expert_phy_id in range(num_groups):
+        expert_weight = weight_cpu[layer_id, expert_phy_id].item()
+        logical_id = layer_phy2mlog[expert_phy_id].item()
+        
+        # 找到该expert之前所在的物理位置
+        old_phy_expert_indices = layer_old_log2phy[logical_id]
+        valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
+        
+        if valid_old_phy_indices.numel() == 0:
+            # 没有历史位置，通信惩罚为0
+            comm_penalties[expert_phy_id, :] = 0.0
+        else:
+            # 计算到每个pack的通信惩罚
+            valid_old_gpus = valid_old_phy_indices // groups_per_pack
+            
+            for target_gpu in range(num_packs):
+                if (valid_old_gpus == target_gpu).any():
+                    # 如果expert之前就在这个GPU上，无通信惩罚
+                    comm_penalties[expert_phy_id, target_gpu] = 0.0
+                else:
+                    # 计算最小通信惩罚
+                    target_node_id = target_gpu // gpus_per_node
+                    min_penalty = float('inf')
+                    
+                    for old_gpu_tensor in valid_old_gpus:
+                        old_gpu = old_gpu_tensor.item()
+                        old_node_id = old_gpu // gpus_per_node
+                        
+                        if old_node_id == target_node_id:
+                            penalty = intra_node_penalty_factor * expert_weight
+                        else:
+                            penalty = inter_node_penalty_factor * expert_weight
+                        
+                        min_penalty = min(min_penalty, penalty)
+                    
+                    comm_penalties[expert_phy_id, target_gpu] = min_penalty
+    
+    return comm_penalties
+
 def balanced_packing_with_affinity_vectorized(
     weight: torch.Tensor, 
     num_packs: int, 
@@ -136,10 +197,13 @@ def balanced_packing_with_affinity_vectorized(
     intra_node_penalty_factor: float = 0.2,
     inter_node_penalty_factor: float = 1.2
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    向量化版本的balanced packing with affinity
+    """
     num_layers, num_groups = weight.shape
     assert num_groups % num_packs == 0
     groups_per_pack = num_groups // num_packs
-    gpus_per_node = num_packs // num_nodes
+    packs_per_node = num_packs // num_nodes
 
     if groups_per_pack == 1:
         pack_index = torch.arange(
@@ -148,90 +212,59 @@ def balanced_packing_with_affinity_vectorized(
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
+    # 转移到CPU进行计算
     indices = weight.float().sort(-1, descending=True).indices.cpu()
-    
     pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
-
     weight_cpu = weight.cpu()
     phy2mlog_cpu = phy2mlog.cpu()
     old_log2phy_cpu = old_log2phy.cpu()
-    
-    all_gpus = torch.arange(num_packs, dtype=torch.int64)
-    all_nodes = all_gpus // gpus_per_node
 
-    for i in range(num_layers):
-        pack_weights = np.zeros(num_packs, dtype=np.float32)
-        pack_items = np.zeros(num_packs, dtype=np.int32)
+    for layer_id in range(num_layers):
+        # 预计算通信惩罚矩阵
+        comm_penalties = precompute_communication_penalties(
+            layer_id, num_groups, num_packs, phy2mlog_cpu, old_log2phy_cpu,
+            packs_per_node, groups_per_pack, intra_node_penalty_factor, 
+            inter_node_penalty_factor, weight_cpu
+        )
         
-        for expert_phy_id in indices[i]:
-            expert_phy_id = expert_phy_id.item()
-            expert_w = weight_cpu[i, expert_phy_id].item()
-
-            # --- Vectorized Cost Calculation (Corrected) ---
-
-            # 1. Load Cost
-            load_cost_vec = pack_weights
-
-            # 2. Communication Affinity Cost
-            logical_id = phy2mlog_cpu[i, expert_phy_id].item()
-            old_phy_expert_indices = old_log2phy_cpu[i, logical_id]
-            valid_old_phy_indices = old_phy_expert_indices[old_phy_expert_indices >= 0]
+        # 初始化pack状态
+        pack_weights = torch.zeros(num_packs, dtype=torch.float32)
+        pack_items = torch.zeros(num_packs, dtype=torch.int32)
+        
+        # 按权重降序处理每个expert
+        layer_indices = indices[layer_id]
+        layer_weights = weight_cpu[layer_id]
+        
+        for idx in range(num_groups):
+            expert_id = layer_indices[idx].item()
+            expert_weight = layer_weights[expert_id].item()
             
-            # --- BUG FIX START ---
-            if valid_old_phy_indices.numel() == 0:
-                # CORRECT: New experts have 0 communication penalty, matching original logic.
-                comm_cost_vec = np.zeros(num_packs, dtype=np.float32)
-            else:
-                # IMPROVEMENT: Initialize with infinity to correctly find the minimum penalty.
-                comm_cost_vec = np.full(num_packs, float('inf'), dtype=np.float32)
-                
-                valid_old_gpus = valid_old_phy_indices // groups_per_pack
-                
-                for old_gpu in valid_old_gpus:
-                    old_gpu = old_gpu.item()
-                    old_node_id = old_gpu // gpus_per_node
-                    
-                    is_intra_node = (all_nodes == old_node_id).numpy()
-                    
-                    # Calculate potential penalties for moving from this *one* old_gpu
-                    current_penalties = np.where(
-                        is_intra_node, 
-                        intra_node_penalty_factor * expert_w, 
-                        inter_node_penalty_factor * expert_w
-                    )
-                    
-                    # Update the communication cost by taking the element-wise minimum.
-                    # This correctly finds the minimum penalty for *each target GPU* across all possible source GPUs.
-                    comm_cost_vec = np.minimum(comm_cost_vec, current_penalties)
-
-                # The most preferred locations (where the expert already was) have 0 penalty.
-                # This must be done after the loop to override any calculated penalties.
-                comm_cost_vec[valid_old_gpus.numpy()] = 0.0
-            # --- BUG FIX END ---
-
-            # 3. Total Cost Vector
-            total_cost_vec = load_cost_vec + comm_cost_vec
-
-            # --- Find Best Pack ---
-            available_mask = pack_items < groups_per_pack
-            total_cost_vec[~available_mask] = float('inf')
+            # 找到可用的packs（未满的pack）
+            available_packs = (pack_items < groups_per_pack).nonzero(as_tuple=True)[0]
             
-            # If all available packs have inf cost, argmin will still return 0.
-            # The subsequent assert handles this case.
-            if not np.any(available_mask):
-                # This should not happen if the logic is correct and num_groups is divisible by num_packs
-                raise RuntimeError("No available packs to place an expert. Check group/pack configuration.")
-
-            best_pack = np.argmin(total_cost_vec)
-
-            # --- Update State ---
-            assert pack_items[best_pack] < groups_per_pack, f"Pack {best_pack} is already full!"
-            pack_index[i, expert_phy_id] = best_pack
-            rank_in_pack[i, expert_phy_id] = pack_items[best_pack]
-            pack_weights[best_pack] += expert_w
-            pack_items[best_pack] += 1
+            if len(available_packs) == 0:
+                raise RuntimeError("No available packs found")
             
+            # 向量化计算所有可用pack的total cost
+            available_pack_weights = pack_weights[available_packs]
+            available_comm_penalties = comm_penalties[expert_id, available_packs]
+            
+            # total_cost = load_cost + communication_penalty
+            total_costs = available_pack_weights + available_comm_penalties
+            
+            # 找到cost最小的pack
+            min_cost_idx = torch.argmin(total_costs)
+            selected_pack = available_packs[min_cost_idx].item()
+            
+            # 更新分配结果
+            pack_index[layer_id, expert_id] = selected_pack
+            rank_in_pack[layer_id, expert_id] = pack_items[selected_pack].item()
+            
+            # 更新pack状态
+            pack_weights[selected_pack] += expert_weight
+            pack_items[selected_pack] += 1
+
     return pack_index.to(weight.device), rank_in_pack.to(weight.device)
 
 # def balanced_packing_with_affinity_vectorized(
