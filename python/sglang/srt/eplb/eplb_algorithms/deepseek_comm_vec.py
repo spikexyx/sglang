@@ -4,33 +4,6 @@ from typing import Optional, Tuple
 import torch
 
 
-def pack_groups(tokens_per_group: torch.Tensor, num_nodes: int) -> torch.Tensor:
-    num_layers, num_groups = tokens_per_group.shape
-    assert num_groups % num_nodes == 0
-    groups_per_rank = num_groups // num_nodes
-
-    indices = tokens_per_group.float().sort(-1, descending=True).indices.cpu()
-    ret = torch.full_like(
-        tokens_per_group, fill_value=-1, dtype=torch.int64, device="cpu"
-    )
-    for layer in range(num_layers):
-        node_tokens = [0] * num_nodes
-        node_groups = [0] * num_nodes
-        for group in indices[layer]:
-
-            def key_func(rank: int) -> int:
-                if node_groups[rank] >= groups_per_rank:
-                    return 1, 0
-                else:
-                    return 0, node_tokens[rank]
-
-            rank = min(range(num_nodes), key=key_func)
-            assert node_groups[rank] < groups_per_rank
-            ret[layer, group] = rank * groups_per_rank + node_groups[rank]
-            node_tokens[rank] += tokens_per_group[layer, group]
-            node_groups[rank] += 1
-    return ret
-
 def compute_communication_penalty(
     current_phy_to_log: torch.Tensor,
     old_log_to_phy_map: torch.Tensor,
@@ -296,7 +269,7 @@ def make_redundant_experts_chunkwise(
 
         # Add communication into consideration
         if old_log_to_phy_map is not None:
-            comm_penalty = compute_communication_penalty(
+            comm_penalty = compute_communication_penalty_vectorized(
                 physical_to_logical_map,
                 old_log_to_phy_map,
                 num_chunks,
@@ -375,64 +348,6 @@ def decode_rebalance_experts(
     )
 
 
-def prefill_rebalance_experts(
-    tokens_per_expert: torch.Tensor,
-    num_physical_experts: int,
-    num_local_physical_experts: int,
-    num_groups: int,
-    num_nodes: int,
-):
-    tokens_per_expert = tokens_per_expert.float().cpu()
-
-    num_steps, _, num_logical_experts = tokens_per_expert.shape
-    assert num_logical_experts % num_groups == 0
-    group_size = num_logical_experts // num_groups
-    assert num_groups % num_nodes == 0, f"{num_groups=} {num_nodes=}"
-
-    tokens_per_group = tokens_per_expert.sum(0).unflatten(-1, (num_groups, -1)).sum(-1)
-    group_perm = pack_groups(
-        tokens_per_group, num_nodes
-    )  # [num_moe_layers, num_groups] => [num_moe_layers, num_nodes]
-
-    # log2mlog [layers, #logexp] -> [layers, #logexp]
-    log2mlog = (
-        (group_perm * group_size).unsqueeze(-1)
-        + torch.arange(group_size, dtype=torch.int64, device=group_perm.device)
-    ).flatten(-2)
-
-    # mlog2log [layers, #logexp] -> [layers, #logexp], inverse of log2mlog
-    mlog2log = torch.empty_like(log2mlog)
-    arange = torch.arange(
-        num_logical_experts, dtype=torch.int64, device=mlog2log.device
-    )
-    mlog2log.scatter_(1, log2mlog, arange.expand(log2mlog.size(0), -1))
-
-    # tokens_per_mlog[i][j][k] = tokens_per_expert[i][j][mlog2log[j][k]]
-    tokens_per_mlog = tokens_per_expert.gather(
-        2, mlog2log.unsqueeze(0).expand(num_steps, -1, -1)
-    )
-
-    phy2mlog, mlog2phy, mlog_count = make_redundant_experts_chunkwise(
-        tokens_per_mlog,
-        num_physical_experts,
-        num_local_physical_experts,
-        num_physical_experts // num_nodes,
-    )
-
-    # phy2log[i][j] = mlog2log[i][phy2mlog[i][j]]
-    phy2log = mlog2log.gather(1, phy2mlog.to(torch.int64))
-
-    # mlog2phy: [num_moe_layers, num_logical_experts, ...]
-    # log2phy[i][j][k] = mlog2phy[i][log2mlog[i][j]][k]
-    log2phy = mlog2phy.gather(
-        1, log2mlog.unsqueeze(-1).expand(-1, -1, mlog2phy.size(-1)).to(torch.int64)
-    )
-
-    # log_count[i][j] = mlog_count[i][log2mlog[i][j]]
-    log_count = mlog_count.gather(1, log2mlog)
-    return phy2log, log2phy, log_count
-
-
 def rebalance_experts(
     tokens_per_expert: torch.Tensor,
     num_physical_experts: int,
@@ -440,33 +355,23 @@ def rebalance_experts(
     num_groups: Optional[int],
     num_nodes: int,
     num_gpus: int,
-    enable_hierarchical: bool,
     intra_node_penalty: float,
     inter_node_penalty: float
 ):
-    if enable_hierarchical:
-        return prefill_rebalance_experts(
-            tokens_per_expert=tokens_per_expert,
-            num_physical_experts=num_physical_experts,
-            num_local_physical_experts=num_local_physical_experts,
-            num_groups=num_groups,
-            num_nodes=num_nodes,
-        )
-    else:
-        from sglang.srt.eplb.expert_location import (
-            get_global_expert_location_metadata,
-        )
-        old_phy_to_log_map = get_global_expert_location_metadata().physical_to_logical_map
-        old_log_to_phy_map = get_global_expert_location_metadata().logical_to_all_physical_map
-        return decode_rebalance_experts(
-            tokens_per_expert=tokens_per_expert,
-            num_physical_experts=num_physical_experts,
-            num_local_physical_experts=num_local_physical_experts,
-            num_nodes=num_nodes,
-            num_gpus=num_gpus,
-            old_phy_to_log_map=old_phy_to_log_map,
-            old_log_to_phy_map=old_log_to_phy_map,
-            comm_weight=0.2,
-            intra_node_penalty=intra_node_penalty,
-            inter_node_penalty=inter_node_penalty
-        )
+    from sglang.srt.eplb.expert_location import (
+        get_global_expert_location_metadata,
+    )
+    old_phy_to_log_map = get_global_expert_location_metadata().physical_to_logical_map
+    old_log_to_phy_map = get_global_expert_location_metadata().logical_to_all_physical_map
+    return decode_rebalance_experts(
+        tokens_per_expert=tokens_per_expert,
+        num_physical_experts=num_physical_experts,
+        num_local_physical_experts=num_local_physical_experts,
+        num_nodes=num_nodes,
+        num_gpus=num_gpus,
+        old_phy_to_log_map=old_phy_to_log_map,
+        old_log_to_phy_map=old_log_to_phy_map,
+        comm_weight=0.2,
+        intra_node_penalty=intra_node_penalty,
+        inter_node_penalty=inter_node_penalty
+    )
