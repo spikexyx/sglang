@@ -149,7 +149,9 @@ def fast_balanced_packing(
         return pack_index, rank_in_pack
 
     weight_np = weight.cpu().numpy()
-    indices = weight.argsort(axis=-1)[:, ::-1].cpu().numpy()
+    sorted_indices = weight.argsort(axis=-1)
+    indices = torch.flip(sorted_indices, dims=[1]).cpu().numpy()
+    # indices = weight.argsort(axis=-1)[:, ::-1].cpu().numpy()
     
     pack_index = np.full_like(weight_np, fill_value=-1, dtype=np.int64)
     rank_in_pack = np.full_like(pack_index, fill_value=-1)
