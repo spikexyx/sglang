@@ -103,12 +103,13 @@ def balanced_packing_with_affinity(
         return pack_index, rank_in_pack
 
     indices = weight.float().sort(-1, descending=True).indices.cpu()
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
+    # pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device=weight.device)
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
 
-    weight_cpu = weight.cpu()
-    phy2mlog_cpu = phy2mlog.cpu()
-    old_log2phy_cpu = old_log2phy.cpu()
+    # weight_cpu = weight.cpu()
+    # phy2mlog_cpu = phy2mlog.cpu()
+    # old_log2phy_cpu = old_log2phy.cpu()
 
     for i in range(num_layers):
         pack_weights = [0.0] * num_packs
@@ -118,13 +119,13 @@ def balanced_packing_with_affinity(
             pack = min(
                 (k for k in range(num_packs) if pack_items[k] < groups_per_pack),
                 key=lambda k: cost_function(
-                    i, k, group, weight_cpu[i, group].item(), pack_weights, phy2mlog_cpu, old_log2phy_cpu, packs_per_node, groups_per_pack, intra_node_penalty_factor, inter_node_penalty_factor
+                    i, k, group, weight[i, group].item(), pack_weights, phy2mlog, old_log2phy, packs_per_node, groups_per_pack, intra_node_penalty_factor, inter_node_penalty_factor
                 )
             )
             assert pack_items[pack] < groups_per_pack
             pack_index[i, group] = pack
             rank_in_pack[i, group] = pack_items[pack]
-            pack_weights[pack] += weight_cpu[i, group].item()
+            pack_weights[pack] += weight[i, group].item()
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
@@ -198,10 +199,10 @@ def balanced_packing_with_affinity_vectorized(
     """
     向量化版本的balanced packing with affinity
     """
-    num_layers, num_groups = weight.shape
+    num_layers, num_groups = weight.shape # num_groups: num_physical_experts
     assert num_groups % num_packs == 0
-    groups_per_pack = num_groups // num_packs
-    packs_per_node = num_packs // num_nodes
+    groups_per_pack = num_groups // num_packs # phy_ep_per_gpu
+    packs_per_node = num_packs // num_nodes # gpu_per_node
 
     if groups_per_pack == 1:
         pack_index = torch.arange(
@@ -530,7 +531,7 @@ def rebalance_experts_with_affinity(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity_vectorized(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
