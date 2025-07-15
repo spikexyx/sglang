@@ -103,13 +103,13 @@ def balanced_packing_with_affinity(
         return pack_index, rank_in_pack
 
     indices = weight.float().sort(-1, descending=True).indices.cpu()
-    # pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device=weight.device)
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
+    # pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device=weight.device)
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
 
-    # weight_cpu = weight.cpu()
-    # phy2mlog_cpu = phy2mlog.cpu()
-    # old_log2phy_cpu = old_log2phy.cpu()
+    weight_cpu = weight.cpu()
+    phy2mlog_cpu = phy2mlog.cpu()
+    old_log2phy_cpu = old_log2phy.cpu()
 
     for i in range(num_layers):
         pack_weights = [0.0] * num_packs
@@ -119,13 +119,13 @@ def balanced_packing_with_affinity(
             pack = min(
                 (k for k in range(num_packs) if pack_items[k] < groups_per_pack),
                 key=lambda k: cost_function(
-                    i, k, group, weight[i, group].item(), pack_weights, phy2mlog, old_log2phy, packs_per_node, groups_per_pack, intra_node_penalty_factor, inter_node_penalty_factor
+                    i, k, group, weight_cpu[i, group].item(), pack_weights, phy2mlog_cpu, old_log2phy_cpu, packs_per_node, groups_per_pack, intra_node_penalty_factor, inter_node_penalty_factor
                 )
             )
             assert pack_items[pack] < groups_per_pack
             pack_index[i, group] = pack
             rank_in_pack[i, group] = pack_items[pack]
-            pack_weights[pack] += weight[i, group].item()
+            pack_weights[pack] += weight_cpu[i, group].item()
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
