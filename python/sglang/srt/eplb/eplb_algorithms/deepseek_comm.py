@@ -129,6 +129,140 @@ def balanced_packing_with_affinity(
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
+
+def optimized_balanced_packing_with_affinity(
+    weight: torch.Tensor, 
+    num_packs: int, 
+    phy2mlog: torch.Tensor, 
+    old_log2phy: torch.Tensor, 
+    num_nodes: int,
+    # num_gpus is equivalent to num_packs, can be removed for clarity
+    num_gpus: int, 
+    intra_node_penalty_factor: float = 0.2,
+    inter_node_penalty_factor: float = 1.2
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Optimized version of balanced packing with affinity.
+    It pre-calculates communication costs for all (expert, gpu) pairs per layer
+    and uses vectorized operations to speed up the process.
+    """
+    num_layers, num_groups = weight.shape
+    device = weight.device
+    assert num_groups % num_packs == 0, "Number of groups must be divisible by number of packs"
+    groups_per_pack = num_groups // num_packs
+    gpus_per_node = num_packs // num_nodes # Renamed from packs_per_node for clarity
+
+    if groups_per_pack == 1:
+        # This is a trivial case, no packing needed, can be returned directly.
+        pack_index = torch.arange(num_groups, dtype=torch.int64, device=device).expand(weight.shape)
+        rank_in_pack = torch.zeros_like(pack_index)
+        return pack_index, rank_in_pack
+
+    # Sort experts by weight once
+    sorted_indices = weight.float().sort(-1, descending=True).indices
+
+    # Final result tensors, initialized on the device
+    pack_index = torch.full_like(weight, -1, dtype=torch.int64, device=device)
+    rank_in_pack = torch.full_like(weight, -1, dtype=torch.int64, device=device)
+    
+    # --- Main Loop over Layers ---
+    for i in range(num_layers):
+        # --- 1. Pre-computation of Communication Cost (Vectorized) ---
+        # This is the core optimization.
+        
+        # Get all logical IDs for the current layer
+        # expert_phy_ids are just 0, 1, ..., num_groups-1
+        expert_phy_ids = torch.arange(num_groups, device=device)
+        logical_ids = phy2mlog[i, expert_phy_ids]
+
+        # Find previous physical locations (replicas) for each expert
+        # old_log2phy might have multiple previous locations per logical ID
+        # Shape: [num_groups, num_replicas]
+        old_phy_indices = old_log2phy[i, logical_ids]
+
+        # Create a mask for valid previous locations (>= 0)
+        valid_mask = old_phy_indices >= 0
+
+        # Calculate previous GPUs and node IDs, handling invalid indices
+        old_gpus = torch.full_like(old_phy_indices, -1, device=device)
+        old_gpus[valid_mask] = old_phy_indices[valid_mask] // groups_per_pack
+        
+        old_node_ids = torch.full_like(old_gpus, -1, device=device)
+        old_node_ids[valid_mask] = old_gpus[valid_mask] // gpus_per_node
+
+        # Target GPUs and their corresponding node IDs
+        # Shape: [num_packs]
+        target_gpus = torch.arange(num_packs, device=device)
+        target_node_ids = target_gpus // gpus_per_node
+
+        # Expand dims for broadcasting:
+        # old_gpus: [num_groups, num_replicas, 1]
+        # target_gpus: [1, 1, num_packs]
+        # old_node_ids: [num_groups, num_replicas, 1]
+        # target_node_ids: [1, 1, num_packs]
+        old_gpus_b = old_gpus.unsqueeze(-1)
+        target_gpus_b = target_gpus.view(1, 1, -1)
+        old_node_ids_b = old_node_ids.unsqueeze(-1)
+        target_node_ids_b = target_node_ids.view(1, 1, -1)
+        
+        # Calculate penalties for all (expert, replica, target_gpu) combinations
+        # Start with max penalty, then fill in smaller ones
+        penalties = torch.full_like(old_gpus_b.expand(-1, -1, num_packs), 
+                                   inter_node_penalty_factor, device=device)
+        
+        # Intra-node penalty applies if nodes match but GPUs don't
+        same_node_mask = (old_node_ids_b == target_node_ids_b) & (old_gpus_b != target_gpus_b)
+        penalties[same_node_mask] = intra_node_penalty_factor
+        
+        # Zero penalty if the expert is already on the target GPU
+        same_gpu_mask = old_gpus_b == target_gpus_b
+        penalties[same_gpu_mask] = 0.0
+
+        # Invalidate penalties for non-existent previous locations by setting them to a large value
+        # This ensures they are ignored by the min() operation
+        penalties[~valid_mask.unsqueeze(-1)] = float('inf')
+
+        # For each expert, find the minimum penalty across its previous locations (replicas)
+        # If an expert had no previous valid location, min will be inf. We correct this to 0.
+        min_penalties, _ = torch.min(penalties, dim=1)
+        min_penalties[torch.isinf(min_penalties)] = 0.0 # No valid old location means no penalty
+
+        # Finally, scale penalty by expert weight to get the communication cost
+        # Shape: [num_groups, num_packs]
+        layer_weight = weight[i].unsqueeze(-1) # Shape: [num_groups, 1]
+        communication_costs = min_penalties * layer_weight
+
+        # --- 2. Optimized Greedy Assignment Loop ---
+        # State variables are now tensors on the GPU
+        pack_weights = torch.zeros(num_packs, device=device, dtype=torch.float32)
+        pack_items_count = torch.zeros(num_packs, device=device, dtype=torch.int64)
+
+        for group_phy_id in sorted_indices[i]:
+            # The mask of packs that are not yet full
+            available_pack_mask = pack_items_count < groups_per_pack
+            
+            # Get costs for this specific group to be placed in any pack
+            # This is the key step: O(1) lookup + O(M) vector addition
+            # instead of a loop with expensive function calls.
+            load_costs = pack_weights
+            comm_costs = communication_costs[group_phy_id]
+            total_costs = load_costs + comm_costs
+            
+            # Invalidate costs of full packs
+            total_costs[~available_pack_mask] = float('inf')
+            
+            # Find the best pack with a single argmin operation
+            best_pack = torch.argmin(total_costs).item()
+
+            # Update state
+            pack_index[i, group_phy_id] = best_pack
+            rank_in_pack[i, group_phy_id] = pack_items_count[best_pack]
+            pack_weights[best_pack] += weight[i, group_phy_id]
+            pack_items_count[best_pack] += 1
+            
+    # Move final results to CPU if needed, to match original function's output behavior
+    return pack_index.cpu(), rank_in_pack.cpu()
+
 def precompute_communication_penalties(
     layer_id: int,
     num_groups: int,
@@ -531,7 +665,7 @@ def rebalance_experts_with_affinity(
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-    pack_index, rank_in_pack = balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor)
+    pack_index, rank_in_pack = optimized_balanced_packing_with_affinity(tokens_per_phy, num_gpus // num_nodes, phy2mlog, old_log2phy, nnodes, num_gpus, intra_node_penalty_factor, inter_node_penalty_factor)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
     pphy2phy = inverse(phy2pphy)
 
