@@ -148,17 +148,9 @@ def fast_balanced_packing(
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
-    # weight_np = weight.cpu().numpy()
-    # sorted_indices = weight.argsort(axis=-1)
-    # indices = torch.flip(sorted_indices, dims=[1]).cpu().numpy()
-    # indices = weight.argsort(axis=-1)[:, ::-1].cpu().numpy()
-
     indices = weight.float().sort(-1, descending=True).indices.cpu()
     pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device='cpu')
     rank_in_pack = torch.full_like(pack_index, fill_value=-1)
-    
-    # pack_index = np.full_like(weight_np, fill_value=-1, dtype=np.int64)
-    # rank_in_pack = np.full_like(pack_index, fill_value=-1)
     
     affinity_penalties = precompute_affinity_matrix(
         phy2mlog, old_log2phy, num_layers, num_groups, num_packs, 
@@ -166,20 +158,25 @@ def fast_balanced_packing(
     )
     
     for layer_id in range(num_layers):
-        pack_weights = np.zeros(num_packs)
-        pack_counts = np.zeros(num_packs, dtype=np.int32)
+        pack_weights = [0] * num_packs
+        pack_counts = [0] * num_packs
         
         for expert_id in indices[layer_id]:
             expert_weight = weight[layer_id, expert_id]
             
             available_mask = pack_counts < groups_per_pack
-            available_packs = np.where(available_mask)[0]
+            available_packs = torch.where(available_mask)[0]
+
+            if len(available_packs) == 0:
+                continue
             
             load_costs = pack_weights[available_packs]
+
             comm_penalties = affinity_penalties[layer_id, expert_id, available_packs]
+
             total_costs = load_costs + comm_penalties * expert_weight
             
-            best_idx = np.argmin(total_costs)
+            best_idx = torch.argmin(total_costs)
             best_pack = available_packs[best_idx]
             
             pack_index[layer_id, expert_id] = best_pack
@@ -187,21 +184,22 @@ def fast_balanced_packing(
             pack_weights[best_pack] += expert_weight
             pack_counts[best_pack] += 1
     
-    return torch.from_numpy(pack_index), torch.from_numpy(rank_in_pack)
+    return pack_index, rank_in_pack
 
 
 def precompute_affinity_matrix(phy2mlog, old_log2phy, num_layers, num_groups, num_packs, 
                               groups_per_pack, num_nodes, intra_factor, inter_factor):
+    # device = phy2mlog.device
     packs_per_node = num_packs // num_nodes
-    penalties = np.zeros((num_layers, num_groups, num_packs))
+    penalties = torch.zeros((num_layers, num_groups, num_packs), dtype=torch.float32, device='cpu')
     
-    phy2mlog_np = phy2mlog.cpu().numpy()
-    old_log2phy_np = old_log2phy.cpu().numpy()
+    phy2mlog_cpu = phy2mlog.cpu()
+    old_log2phy_cpu = old_log2phy.cpu()
     
     for layer_id in range(num_layers):
         for expert_id in range(num_groups):
-            logical_id = phy2mlog_np[layer_id, expert_id]
-            old_indices = old_log2phy_np[layer_id, logical_id]
+            logical_id = phy2mlog_cpu[layer_id, expert_id]
+            old_indices = old_log2phy_cpu[layer_id, logical_id]
             valid_old_indices = old_indices[old_indices >= 0]
             
             if len(valid_old_indices) == 0:
@@ -210,13 +208,13 @@ def precompute_affinity_matrix(phy2mlog, old_log2phy, num_layers, num_groups, nu
             old_gpus = valid_old_indices // groups_per_pack
             
             for pack_id in range(num_packs):
-                if pack_id in old_gpus:
+                if torch.any(old_gpus == pack_id):
                     penalties[layer_id, expert_id, pack_id] = 0.0
                 else:
                     pack_node = pack_id // packs_per_node
                     old_nodes = old_gpus // packs_per_node
                     
-                    if np.any(old_nodes == pack_node):
+                    if torch.any(old_nodes == pack_node):
                         penalties[layer_id, expert_id, pack_id] = intra_factor
                     else:
                         penalties[layer_id, expert_id, pack_id] = inter_factor
