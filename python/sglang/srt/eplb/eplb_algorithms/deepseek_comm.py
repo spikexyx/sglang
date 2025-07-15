@@ -148,13 +148,17 @@ def fast_balanced_packing(
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
-    weight_np = weight.cpu().numpy()
-    sorted_indices = weight.argsort(axis=-1)
-    indices = torch.flip(sorted_indices, dims=[1]).cpu().numpy()
+    # weight_np = weight.cpu().numpy()
+    # sorted_indices = weight.argsort(axis=-1)
+    # indices = torch.flip(sorted_indices, dims=[1]).cpu().numpy()
     # indices = weight.argsort(axis=-1)[:, ::-1].cpu().numpy()
+
+    indices = weight.float().sort(-1, descending=True).indices.cpu()
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device='cpu')
+    rank_in_pack = torch.full_like(pack_index, fill_value=-1)
     
-    pack_index = np.full_like(weight_np, fill_value=-1, dtype=np.int64)
-    rank_in_pack = np.full_like(pack_index, fill_value=-1)
+    # pack_index = np.full_like(weight_np, fill_value=-1, dtype=np.int64)
+    # rank_in_pack = np.full_like(pack_index, fill_value=-1)
     
     affinity_penalties = precompute_affinity_matrix(
         phy2mlog, old_log2phy, num_layers, num_groups, num_packs, 
@@ -166,7 +170,7 @@ def fast_balanced_packing(
         pack_counts = np.zeros(num_packs, dtype=np.int32)
         
         for expert_id in indices[layer_id]:
-            expert_weight = weight_np[layer_id, expert_id]
+            expert_weight = weight[layer_id, expert_id]
             
             available_mask = pack_counts < groups_per_pack
             available_packs = np.where(available_mask)[0]
