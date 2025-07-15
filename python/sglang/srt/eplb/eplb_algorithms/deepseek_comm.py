@@ -179,6 +179,7 @@ def optimized_balanced_packing_with_affinity(
         # old_log2phy might have multiple previous locations per logical ID
         # Shape: [num_groups, num_replicas]
         old_phy_indices = old_log2phy[i, logical_ids]
+        old_phy_indices = old_phy_indices.to(device)
 
         # Create a mask for valid previous locations (>= 0)
         valid_mask = old_phy_indices >= 0
