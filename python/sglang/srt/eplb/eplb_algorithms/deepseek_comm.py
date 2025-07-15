@@ -158,8 +158,10 @@ def fast_balanced_packing(
     )
     
     for layer_id in range(num_layers):
-        pack_weights = [0] * num_packs
-        pack_counts = [0] * num_packs
+        # pack_weights = [0] * num_packs
+        # pack_counts = [0] * num_packs
+        pack_weights = torch.zeros(num_packs, dtype=torch.float32, device='cpu')
+        pack_counts = torch.zeros(num_packs, dtype=torch.int32, device='cpu')
         
         for expert_id in indices[layer_id]:
             expert_weight = weight[layer_id, expert_id]
