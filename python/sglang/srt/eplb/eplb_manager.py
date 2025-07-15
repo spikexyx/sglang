@@ -73,6 +73,15 @@ class EPLBManager:
             self._server_args, self._model_runner.model_config, logical_count
         )
 
+        logger.info("[EPLBManager] New EPLB location metadata init_by_eplb end, start to update")
+
+        msg = f"[EPLBManager] EPLB init_by_eplb compute time:"
+        if enable_timing:
+            torch.cuda.synchronize()
+            time_middle = time.time()
+            msg += f" ={time_middle - time_start:.3f}s"
+        logger.info(msg)
+
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
         for chunk_index, update_layer_ids in enumerate(update_layer_ids_chunks):
             if len(update_layer_ids_chunks) > 1:
