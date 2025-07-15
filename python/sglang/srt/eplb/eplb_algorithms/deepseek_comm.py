@@ -209,7 +209,7 @@ def optimized_balanced_packing_with_affinity(
         # Calculate penalties for all (expert, replica, target_gpu) combinations
         # Start with max penalty, then fill in smaller ones
         penalties = torch.full_like(old_gpus_b.expand(-1, -1, num_packs), 
-                                   inter_node_penalty_factor, device=device)
+                                   inter_node_penalty_factor, dtype=torch.float32, device=device)
         
         # Intra-node penalty applies if nodes match but GPUs don't
         same_node_mask = (old_node_ids_b == target_node_ids_b) & (old_gpus_b != target_gpus_b)
