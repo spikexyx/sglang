@@ -58,7 +58,6 @@ def rebalance_experts(
             num_groups=num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
-            enable_hierarchical=algorithm == EplbAlgorithm.deepseek_hierarchical,
             intra_node_penalty_factor = intra_node_penalty_factor,
             inter_node_penalty_factor = inter_node_penalty_factor
         )
