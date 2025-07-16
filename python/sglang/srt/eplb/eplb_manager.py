@@ -91,6 +91,13 @@ class EPLBManager:
                 update_layer_ids=update_layer_ids,
             )
 
+        msg = f"[EPLBManager] EPLB communication time:"
+        if enable_timing:
+            torch.cuda.synchronize()
+            time_middle_2 = time.time()
+            msg += f" ={time_middle_2 - time_middle:.3f}s"
+        logger.info(msg)
+
         msg = f"[EPLBManager] rebalance end"
         if enable_timing:
             torch.cuda.synchronize()
