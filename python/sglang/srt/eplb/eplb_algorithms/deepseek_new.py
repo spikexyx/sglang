@@ -9,7 +9,6 @@ def rebalance_experts_with_affinity(
     num_physical_experts: int,
     num_local_physical_experts: int,
     num_nodes: int,
-    num_gpus: int,
 ):
     num_layers, num_logical_experts = weight.shape
     assert num_physical_experts % num_local_physical_experts == 0
