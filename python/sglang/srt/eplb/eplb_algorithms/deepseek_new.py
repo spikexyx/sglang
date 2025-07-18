@@ -90,7 +90,7 @@ def rebalance_experts_with_affinity(
         
         sorted_scores, sorted_indices = score.sort(-1, descending=True)
 
-        gpu_loads = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
+        gpu_loads = torch.zeros(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
         gpu_ep_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
 
         balanced_indices = torch.full_like(score, -1, dtype=torch.long, device=weight.device)
