@@ -1,8 +1,10 @@
 import logging
 import time
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch.cuda
+
+import threading
 
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ExpertLocationMetadata
@@ -30,6 +32,7 @@ class EPLBManager:
             self._server_args.eplb_rebalance_layers_per_chunk
         )
         self._rebalance_num_iterations = self._server_args.eplb_rebalance_num_iterations
+        self._old_experts_metadata = None
 
         # Otherwise, the circular buffer will contain stale data. If the case is needed, it can be implemented.
         assert (
@@ -45,6 +48,9 @@ class EPLBManager:
         )
 
         self._main_generator = self._entrypoint()
+
+    def _post_rebalance_handler(self):
+        yield
 
     def on_forward_pass_end(self):
         next(self._main_generator)
@@ -75,7 +81,7 @@ class EPLBManager:
 
         logger.info("[EPLBManager] New EPLB location metadata init_by_eplb end, start to update")
 
-        msg = f"[EPLBManager] EPLB init_by_eplb compute time:"
+        msg = f"[EPLBManager] EPLB algorithm compute time:"
         if enable_timing:
             torch.cuda.synchronize()
             time_middle = time.time()
@@ -104,6 +110,15 @@ class EPLBManager:
             time_end = time.time()
             msg += f" time={time_end - time_start:.3f}s"
         logger.info(msg)
+
+        self._old_experts_metadata = expert_location_metadata
+
+        thread = threading.Thread(
+            target=self._post_rebalance_handler,
+            args=(),
+            daemon=True,
+        )
+        thread.start()
 
     def _compute_update_layer_ids_chunks(self) -> List[List[int]]:
         all_layer_ids = sorted(
