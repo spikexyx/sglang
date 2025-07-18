@@ -51,7 +51,7 @@ class EPLBManager:
 
     def _post_rebalance_handler(self):
         logger.info("[EPLBManager] post rebalance handler start")
-        yield
+        
 
     def on_forward_pass_end(self):
         next(self._main_generator)
