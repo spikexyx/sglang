@@ -83,8 +83,8 @@ def rebalance_experts(
         return deepseek_new.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
             num_nodes=num_nodes,
-            num_gpus=num_physical_experts // num_local_physical_experts
         )
 
     raise NotImplementedError
