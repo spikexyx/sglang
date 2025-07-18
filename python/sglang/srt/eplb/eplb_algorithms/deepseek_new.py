@@ -60,11 +60,7 @@ def rebalance_experts_with_affinity(
         redundancy_count = (
             logical_count.gather(-1, redundancy_indices.view(num_layers, 1)).squeeze(1)
         )
-        # physical_redundancy_indices = (
-        #     (
-        #         [0] * num_physical_experts + num_logical_experts + i
-        #     ).expand(num_layers, 1).flatten()
-        # )
+        
         physical_redundancy_indices = torch.full(
             (num_layers,),
             num_logical_experts + i,
