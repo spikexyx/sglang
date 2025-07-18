@@ -99,7 +99,13 @@ def rebalance_experts_with_affinity(
             expert_to_assign = sorted_indices[:, i]
             expert_score = sorted_scores[:, i]
 
-            target_gpu = gpu_loads.argmin(-1)
+            masked_gpu_loads = gpu_loads.clone()
+
+            full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
+            
+            masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
+
+            target_gpu = masked_gpu_loads.argmin(-1)
 
             slot_on_gpu = gpu_ep_counts.gather(-1, target_gpu.unsqueeze(1)).squeeze(1)
 
