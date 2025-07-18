@@ -102,7 +102,7 @@ class EPLBManager:
         if enable_timing:
             torch.cuda.synchronize()
             time_middle_2 = time.time()
-            msg += f" ={time_middle_2 - time_middle:.3f}s"
+            msg += f" = {time_middle_2 - time_middle:.3f}s"
         logger.info(msg)
 
         self._old_experts_metadata = expert_location_metadata
@@ -118,7 +118,7 @@ class EPLBManager:
         if enable_timing:
             torch.cuda.synchronize()
             time_end = time.time()
-            msg += f" time={time_end - time_start:.3f}s"
+            msg += f" time= {time_end - time_start:.3f}s"
         logger.info(msg)
 
     def _compute_update_layer_ids_chunks(self) -> List[List[int]]:
