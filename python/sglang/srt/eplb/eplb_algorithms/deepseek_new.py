@@ -93,28 +93,28 @@ def rebalance_experts_with_affinity(
         gpu_loads = torch.zeros(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
         gpu_ep_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
 
-        balanced_indices = torch.full_like(score, -1, dtype=torch.long, device=weight.device)
+        # balanced_indices = torch.full_like(score, -1, dtype=torch.long, device=weight.device)
+        sorted_expert_final_pos = torch.full_like(sorted_indices, -1)
 
         for i in range(num_physical_experts):
-            expert_to_assign = sorted_indices[:, i]
             expert_score = sorted_scores[:, i]
 
             masked_gpu_loads = gpu_loads.clone()
-
             full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
-            
             masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
 
-            target_gpu = masked_gpu_loads.argmin(-1)
-
-            slot_on_gpu = gpu_ep_counts.gather(-1, target_gpu.unsqueeze(1)).squeeze(1)
+            target_gpu = masked_gpu_loads.argmin(dim=1)
+            slot_on_gpu = gpu_ep_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
 
             final_pos = target_gpu * num_local_physical_experts + slot_on_gpu
 
-            balanced_indices.scatter_(1, final_pos.unsqueeze(1), expert_to_assign.unsqueeze(1))
+            sorted_expert_final_pos[:, i] = final_pos
 
-            gpu_loads.scatter_add(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
-            gpu_ep_counts.scatter_add(1, target_gpu.unsqueeze(1), torch.ones_like(target_gpu.unsqueeze(1)))
+            gpu_loads.scatter_add_(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
+            gpu_ep_counts.scatter_add_(1, target_gpu.unsqueeze(1), torch.ones_like(target_gpu.unsqueeze(1)))
+
+        balanced_indices = torch.full_like(sorted_indices, -1)
+        balanced_indices.scatter_(-1, sorted_expert_final_pos, sorted_indices)
 
         physical_to_logical_map = physical_to_logical_map.gather(-1, balanced_indices)
 
