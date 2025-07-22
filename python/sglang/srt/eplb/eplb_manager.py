@@ -33,6 +33,7 @@ class EPLBManager:
         )
         self._rebalance_num_iterations = self._server_args.eplb_rebalance_num_iterations
         self._old_experts_metadata = None
+        self._comm_penalty = None
 
         # Otherwise, the circular buffer will contain stale data. If the case is needed, it can be implemented.
         assert (
@@ -51,7 +52,54 @@ class EPLBManager:
 
     def _post_rebalance_handler(self):
         logger.info("[EPLBManager] post rebalance handler start")
+        if self._old_experts_metadata is None:
+            logger.info("[EPLBManager] post rebalance handler end with None")
+            return
         
+        old = self._old_experts_metadata
+        world_size = old.ep_size
+        num_nodes = self._server_args.nnodes
+        assert world_size % num_nodes == 0, "world_size must be divisible by num_nodes"
+        gpus_per_node = world_size // num_nodes
+        
+        num_layers = old.num_layers
+        num_log_ep = old.num_logical_experts
+        num_phy_ep = old.num_physical_experts
+
+        assert num_phy_ep % world_size == 0, "num_phy_ep must be divisible by world_size"
+        num_phy_ep_per_gpu = num_phy_ep // world_size
+
+        penalty = torch.zeros((num_layers, num_log_ep, num_phy_ep), dtype=torch.float32)
+
+        expert_gpu = torch.arrange(num_phy_ep) // num_phy_ep_per_gpu
+        expert_node = expert_gpu // gpus_per_node
+
+        for l in range(num_layers):
+            all_phys = old.logical_to_all_physical_map[l]
+            num_valid = old.logical_to_all_physical_map_num_valid[l]
+
+            for x in range(num_log_ep):
+                k = num_valid[x].item()
+                if k == 0:
+                    continue
+                phys_mapped = all_phys[x, :k]
+                node_mapped = expert_node[phys_mapped]
+
+                for y in range(num_phy_ep):
+                    my_node = expert_node[y]
+                    # same gpu
+                    if y in phys_mapped:
+                        continue
+
+                    if my_node != node_mapped[0]:
+                        # cross node
+                        penalty[l, x, y] = 2.0
+                    elif y not in phys_mapped:
+                        # same node cross gpu
+                        penalty[l, x, y] = 1.0
+
+        self._comm_penalty = penalty
+        logger.info("[EPLBManager] post rebalance handler end")
 
     def on_forward_pass_end(self):
         next(self._main_generator)
