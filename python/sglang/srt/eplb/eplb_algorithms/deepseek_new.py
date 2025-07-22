@@ -109,7 +109,7 @@ def rebalance_experts_with_affinity(
 
             # calculate move penalty
             g = torch.arange(num_gpus, device=weight.device).view(1, -1)
-            y = g * num_local_physical_experts + gpu_ep_counts.unsqueeze(1)
+            y = g * num_local_physical_experts + gpu_ep_counts
             y = torch.clamp(y, 0, num_physical_experts - 1)
 
             if comm_penalty is not None:
