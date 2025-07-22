@@ -105,7 +105,7 @@ def rebalance_experts_with_affinity(
 
             masked_gpu_loads = gpu_loads.clone()
             full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
-            masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
+            # masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
 
             # calculate move penalty
             g = torch.arange(num_gpus, device=weight.device).view(1, -1)
@@ -118,9 +118,15 @@ def rebalance_experts_with_affinity(
                     logic_idx.view(-1, 1),
                     y
                 ]
-                new_load = masked_gpu_loads + (masked_gpu_loads + 1.0) * move
+                projected_load = masked_gpu_loads + expert_score.unsqueeze(1)
+                alpha = 0.5
+                penalty_factor = 1.0 + alpha * move
+                new_load = projected_load * penalty_factor
+                # new_load = masked_gpu_loads + (masked_gpu_loads + 1.0) * move
             else:
-                new_load = masked_gpu_loads
+                new_load = masked_gpu_loads + expert_score.unsqueeze(1)
+
+            new_load[full_gpus_mask] = torch.finfo(score.dtype).max
 
             target_gpu = new_load.argmin(dim=1)
             slot_on_gpu = gpu_ep_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
