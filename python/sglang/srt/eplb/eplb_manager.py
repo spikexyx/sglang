@@ -102,37 +102,10 @@ class EPLBManager:
         in_node_set = in_node_set.any(dim=2)                    # (L, X, Y)
 
         penalty = torch.zeros((L, X, Y), dtype=torch.float32, device=old_log2phy.device)
-        penalty[~in_gpu_set & ~in_node_set] = 2.0   # cross node
-        penalty[~in_gpu_set &  in_node_set] = 1.0   # same node cross gpu
+        penalty[~in_gpu_set & ~in_node_set] = self._server_args.eplb_inter_node_penalty   # cross node
+        penalty[~in_gpu_set &  in_node_set] = self._server_args.eplb_intra_node_penalty  # same node cross gpu
 
-        # penalty1 = torch.zeros((L, X, Y), dtype=torch.float32, device=old_log2phy.device)
-
-        # for l in range(num_layers):
-        #     all_phys = old.logical_to_all_physical_map[l]
-        #     num_valid = old.logical_to_all_physical_map_num_valid[l]
-
-        #     for x in range(num_log_ep):
-        #         k = num_valid[x].item()
-        #         if k == 0:
-        #             continue
-        #         phys_mapped = all_phys[x, :k]
-        #         node_mapped = expert_node[phys_mapped]
-
-        #         for y in range(num_phy_ep):
-        #             my_node = expert_node[y]
-        #             # same gpu
-        #             if y in phys_mapped:
-        #                 continue
-
-        #             if my_node not in node_mapped:
-        #                 # cross node
-        #                 penalty1[l, x, y] = 2.0
-        #             elif y not in phys_mapped:
-        #                 # same node cross gpu
-        #                 penalty1[l, x, y] = 1.0
-
-        self._comm_penalty = penalty
-        print(penalty[0][0])
+        self._comm_penalty = penalty.cpu()
         logger.info("[EPLBManager] post rebalance handler end")
 
     def on_forward_pass_end(self):
@@ -159,7 +132,7 @@ class EPLBManager:
             output_mode="object"
         )["logical_count"]
         expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
-            self._server_args, self._model_runner.model_config, logical_count
+            self._server_args, self._model_runner.model_config, logical_count, self._comm_penalty
         )
 
         logger.info("[EPLBManager] New EPLB location metadata init_by_eplb end, start to update")

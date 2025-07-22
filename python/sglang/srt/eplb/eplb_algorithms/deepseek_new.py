@@ -8,7 +8,7 @@ def rebalance_experts_with_affinity(
     weight: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
-    num_nodes: int,
+    comm_penalty: Optional[torch.Tensor] = None,
 ):
     num_layers, num_logical_experts = weight.shape
     assert num_physical_experts % num_local_physical_experts == 0
@@ -79,6 +79,9 @@ def rebalance_experts_with_affinity(
 
     # Load-balance between devices
     if num_gpus > 1:
+        if comm_penalty is not None:
+            comm_penalty = comm_penalty.to(weight.device)
+
         physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
         counts = logical_count.gather(-1, physical_to_logical_map_int64)
         score = weight.gather(-1, physical_to_logical_map_int64)
@@ -94,12 +97,28 @@ def rebalance_experts_with_affinity(
 
         for i in range(num_physical_experts):
             expert_score = sorted_scores[:, i]
+            logic_idx = sorted_indices[:, i]
 
             masked_gpu_loads = gpu_loads.clone()
             full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
             masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
 
-            target_gpu = masked_gpu_loads.argmin(dim=1)
+            # calculate move penalty
+            g = torch.arange(num_gpus, device=weight.device).view(1, -1)
+            y = g * num_local_physical_experts + gpu_ep_counts.unsqueeze(1)
+            y = torch.clamp(y, 0, num_physical_experts - 1)
+
+            if comm_penalty is not None:
+                move = comm_penalty[
+                    torch.arange(num_layers, device=weight.device).view(-1, 1),
+                    logic_idx.view(-1, 1),
+                    y
+                ]
+                new_load = masked_gpu_loads + (masked_gpu_loads + 1.0) * move
+            else:
+                new_load = masked_gpu_loads
+
+            target_gpu = new_load.argmin(dim=1)
             slot_on_gpu = gpu_ep_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
 
             final_pos = target_gpu * num_local_physical_experts + slot_on_gpu
@@ -130,11 +149,11 @@ def rebalance_experts(
     weight: torch.Tensor,
     num_physical_experts: int,
     num_local_physical_experts: int,
-    num_nodes: int,
+    comm_penalty: Optional[torch.Tensor] = None,
 ):
     weight = weight.float().cpu()
     phy2log, log2phy, logcnt = rebalance_experts_with_affinity(
-        weight, num_physical_experts, num_local_physical_experts, num_nodes
+        weight, num_physical_experts, num_local_physical_experts, comm_penalty
     )
     return phy2log, log2phy, logcnt
 

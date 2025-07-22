@@ -124,7 +124,7 @@ class ExpertLocationMetadata:
 
     @staticmethod
     def init_by_eplb(
-        server_args: ServerArgs, model_config: ModelConfig, logical_count: torch.Tensor
+        server_args: ServerArgs, model_config: ModelConfig, logical_count: torch.Tensor, comm_penalty: Optional[torch.Tensor] = None
     ):
         if not isinstance(logical_count, torch.Tensor):
             logical_count = torch.tensor(logical_count)
@@ -154,7 +154,8 @@ class ExpertLocationMetadata:
                     num_nodes=num_nodes,
                 ),
                 intra_node_penalty_factor=intra_node_penalty_factor,
-                inter_node_penalty_factor=inter_node_penalty_factor
+                inter_node_penalty_factor=inter_node_penalty_factor,
+                comm_penalty=comm_penalty
             )
         )
 

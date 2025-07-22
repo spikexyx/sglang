@@ -26,6 +26,7 @@ def rebalance_experts(
     algorithm: EplbAlgorithm,
     intra_node_penalty_factor: float,
     inter_node_penalty_factor: float,
+    comm_penalty: Optional[torch.Tensor] = None,
 ):
     if algorithm in [EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical]:
         return deepseek.rebalance_experts(
@@ -84,7 +85,7 @@ def rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_physical_experts=num_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
-            num_nodes=num_nodes,
+            comm_penalty=comm_penalty,
         )
 
     raise NotImplementedError
