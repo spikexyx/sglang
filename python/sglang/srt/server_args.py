@@ -171,8 +171,8 @@ class ServerArgs:
     enable_expert_distribution_metrics: bool = False
     deepep_config: Optional[str] = None
     moe_dense_tp_size: Optional[int] = None
-    eplb_intra_node_penalty: float = 1.0
-    eplb_inter_node_penalty: float = 3.0
+    eplb_intra_node_penalty: float = 0.2
+    eplb_inter_node_penalty: float = 0.8
 
     # Double Sparsity
     enable_double_sparsity: bool = False
