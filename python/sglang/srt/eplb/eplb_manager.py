@@ -74,31 +74,57 @@ class EPLBManager:
         expert_gpu = torch.arange(num_phy_ep, device=old.logical_to_all_physical_map.device) // num_phy_ep_per_gpu
         expert_node = expert_gpu // gpus_per_node
 
-        for l in range(num_layers):
-            all_phys = old.logical_to_all_physical_map[l]
-            num_valid = old.logical_to_all_physical_map_num_valid[l]
+        old_log2phy = old.logical_to_all_physical_map
+        old_logcnt = old.logical_to_all_physical_map_num_valid
 
-            for x in range(num_log_ep):
-                k = num_valid[x].item()
-                if k == 0:
-                    continue
-                phys_mapped = all_phys[x, :k]
-                node_mapped = expert_node[phys_mapped]
+        L, X, k_max = old_log2phy.shape
+        Y = expert_node.shape[0]
 
-                for y in range(num_phy_ep):
-                    my_node = expert_node[y]
-                    # same gpu
-                    if y in phys_mapped:
-                        continue
+        # check valid
+        valid = torch.arange(k_max, device=old_log2phy.device).view(1,1,k_max) \
+                < old_logcnt.unsqueeze(-1)                      # (L, X, k_max)
 
-                    if my_node not in node_mapped:
-                        # cross node
-                        penalty[l, x, y] = 2.0
-                    elif y not in phys_mapped:
-                        # same node cross gpu
-                        penalty[l, x, y] = 1.0
+        phys_node = expert_node[old_log2phy]                    # (L, X, k_max)
+
+        # (L, X, k_max, Y), if True: y == phys_mapped[k]
+        y_idx = torch.arange(Y, device=old_log2phy.device).view(1,1,1,Y)
+        in_phys = (old_log2phy.unsqueeze(-1) == y_idx) & valid.unsqueeze(-1)   # (L,X,k_max,Y)
+        in_phys = in_phys.any(dim=2)                            # (L, X, Y)
+
+        node_idx = expert_node.view(1,1,1,Y)
+        in_node_set = (phys_node.unsqueeze(-1) == node_idx) & valid.unsqueeze(-1)
+        in_node_set = in_node_set.any(dim=2)                    # (L, X, Y)
+
+        penalty = torch.zeros((L, X, Y), dtype=torch.float32, device=old_log2phy.device)
+        penalty[~in_phys & ~in_node_set] = 2.0   # cross node
+        penalty[~in_phys &  in_node_set] = 1.0   # same node cross gpu
+
+        # for l in range(num_layers):
+        #     all_phys = old.logical_to_all_physical_map[l]
+        #     num_valid = old.logical_to_all_physical_map_num_valid[l]
+
+        #     for x in range(num_log_ep):
+        #         k = num_valid[x].item()
+        #         if k == 0:
+        #             continue
+        #         phys_mapped = all_phys[x, :k]
+        #         node_mapped = expert_node[phys_mapped]
+
+        #         for y in range(num_phy_ep):
+        #             my_node = expert_node[y]
+        #             # same gpu
+        #             if y in phys_mapped:
+        #                 continue
+
+        #             if my_node not in node_mapped:
+        #                 # cross node
+        #                 penalty[l, x, y] = 2.0
+        #             elif y not in phys_mapped:
+        #                 # same node cross gpu
+        #                 penalty[l, x, y] = 1.0
 
         self._comm_penalty = penalty
+        print(penalty[0])
         logger.info("[EPLBManager] post rebalance handler end")
 
     def on_forward_pass_end(self):
