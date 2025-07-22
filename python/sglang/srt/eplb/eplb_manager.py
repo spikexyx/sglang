@@ -99,32 +99,38 @@ class EPLBManager:
         penalty[~in_phys & ~in_node_set] = 2.0   # cross node
         penalty[~in_phys &  in_node_set] = 1.0   # same node cross gpu
 
-        # for l in range(num_layers):
-        #     all_phys = old.logical_to_all_physical_map[l]
-        #     num_valid = old.logical_to_all_physical_map_num_valid[l]
+        logger.info("[EPLBManager] penalty 1: ")
+        print(penalty[0])
 
-        #     for x in range(num_log_ep):
-        #         k = num_valid[x].item()
-        #         if k == 0:
-        #             continue
-        #         phys_mapped = all_phys[x, :k]
-        #         node_mapped = expert_node[phys_mapped]
+        penalty1 = torch.zeros((L, X, Y), dtype=torch.float32, device=old_log2phy.device)
 
-        #         for y in range(num_phy_ep):
-        #             my_node = expert_node[y]
-        #             # same gpu
-        #             if y in phys_mapped:
-        #                 continue
+        for l in range(num_layers):
+            all_phys = old.logical_to_all_physical_map[l]
+            num_valid = old.logical_to_all_physical_map_num_valid[l]
 
-        #             if my_node not in node_mapped:
-        #                 # cross node
-        #                 penalty[l, x, y] = 2.0
-        #             elif y not in phys_mapped:
-        #                 # same node cross gpu
-        #                 penalty[l, x, y] = 1.0
+            for x in range(num_log_ep):
+                k = num_valid[x].item()
+                if k == 0:
+                    continue
+                phys_mapped = all_phys[x, :k]
+                node_mapped = expert_node[phys_mapped]
+
+                for y in range(num_phy_ep):
+                    my_node = expert_node[y]
+                    # same gpu
+                    if y in phys_mapped:
+                        continue
+
+                    if my_node not in node_mapped:
+                        # cross node
+                        penalty1[l, x, y] = 2.0
+                    elif y not in phys_mapped:
+                        # same node cross gpu
+                        penalty1[l, x, y] = 1.0
 
         self._comm_penalty = penalty
-        print(penalty[0])
+        logger.info("[EPLBManager] penalty 2:")
+        print(penalty1[0])
         logger.info("[EPLBManager] post rebalance handler end")
 
     def on_forward_pass_end(self):
