@@ -97,37 +97,29 @@ def rebalance_experts_with_affinity(
 
         for i in range(num_physical_experts):
             expert_score = sorted_scores[:, i]
-            # logic_idx = sorted_indices[:, i]
-            # logic_idx = physical_to_logical_map_int64[
-            #     torch.arange(num_layers, device=weight.device),
-            #     sorted_indices[:, i]
-            # ]
+            expert_idx = sorted_indices[:, i]
 
+            current_logical_experts = physical_to_logical_map.gather(-1, expert_idx.unsqueeze(1)).squeeze(1)
+            
             masked_gpu_loads = gpu_loads.clone()
             full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
+            # masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
+
+            # calculate move penalty
+            if comm_penalty is not None:
+                gpu_ids = torch.arange(num_gpus, device=weight.device).unsqueeze(0)
+                next_slots = gpu_ids * num_local_physical_experts + gpu_ep_counts
+
+                logical_experts_expanded = current_logical_experts.unsqueeze(1).expand(-1, num_gpus)
+                layer_indices = torch.arange(num_layers, device=weight.device).unsqueeze(1).expand_as(logical_experts_expanded)
+
+                alpha = 0.5
+                penalty_factor = 1.0 + alpha * comm_penalty[layer_indices, logical_experts_expanded, next_slots]
+
+                masked_gpu_loads = penalty_factor * masked_gpu_loads
+
             masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
-
-            # # calculate move penalty
-            # g = torch.arange(num_gpus, device=weight.device).view(1, -1)
-            # y = g * num_local_physical_experts + gpu_ep_counts
-            # y = torch.clamp(y, 0, num_physical_experts - 1)
-
-            # if comm_penalty is not None:
-            #     move = comm_penalty[
-            #         torch.arange(num_layers, device=weight.device).view(-1, 1),
-            #         logic_idx.view(-1, 1),
-            #         y
-            #     ]
-            #     projected_load = masked_gpu_loads + expert_score.unsqueeze(1)
-            #     alpha = 0.5
-            #     penalty_factor = 1.0 + alpha * move
-            #     new_load = projected_load * penalty_factor
-            #     # new_load = masked_gpu_loads + (masked_gpu_loads + 1.0) * move
-            # else:
-            #     new_load = masked_gpu_loads + expert_score.unsqueeze(1)
-
-            # new_load[full_gpus_mask] = torch.finfo(score.dtype).max
-
+            
             target_gpu = masked_gpu_loads.argmin(dim=1)
             slot_on_gpu = gpu_ep_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
 
