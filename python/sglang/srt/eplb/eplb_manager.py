@@ -132,7 +132,7 @@ class EPLBManager:
         #                 penalty1[l, x, y] = 1.0
 
         self._comm_penalty = penalty
-        print(penalty)
+        print(penalty[0][0])
         logger.info("[EPLBManager] post rebalance handler end")
 
     def on_forward_pass_end(self):
