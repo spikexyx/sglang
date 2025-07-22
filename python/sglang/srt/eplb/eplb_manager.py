@@ -71,15 +71,12 @@ class EPLBManager:
 
         penalty = torch.zeros((num_layers, num_log_ep, num_phy_ep), dtype=torch.float32)
 
-        expert_gpu = torch.arange(num_phy_ep) // num_phy_ep_per_gpu
+        expert_gpu = torch.arange(num_phy_ep, device=old.logical_to_all_physical_map.device) // num_phy_ep_per_gpu
         expert_node = expert_gpu // gpus_per_node
 
-        old_log2phy = old.logical_to_all_physical_map.cpu()
-        old_logcnt = old.logical_to_all_physical_map_num_valid.cpu()
-
         for l in range(num_layers):
-            all_phys = old_log2phy[l]
-            num_valid = old_logcnt[l]
+            all_phys = old.logical_to_all_physical_map[l]
+            num_valid = old.logical_to_all_physical_map_num_valid[l]
 
             for x in range(num_log_ep):
                 k = num_valid[x].item()
