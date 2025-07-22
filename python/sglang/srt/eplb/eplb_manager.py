@@ -91,7 +91,7 @@ class EPLBManager:
                     if y in phys_mapped:
                         continue
 
-                    if my_node != node_mapped[0]:
+                    if my_node not in node_mapped:
                         # cross node
                         penalty[l, x, y] = 2.0
                     elif y not in phys_mapped:
