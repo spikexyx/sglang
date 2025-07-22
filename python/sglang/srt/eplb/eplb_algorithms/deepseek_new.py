@@ -97,7 +97,11 @@ def rebalance_experts_with_affinity(
 
         for i in range(num_physical_experts):
             expert_score = sorted_scores[:, i]
-            logic_idx = sorted_indices[:, i]
+            # logic_idx = sorted_indices[:, i]
+            logic_idx = physical_to_logical_map_int64[
+                torch.arange(num_layers, device=weight.device),
+                sorted_indices[:, i]
+            ]
 
             masked_gpu_loads = gpu_loads.clone()
             full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
