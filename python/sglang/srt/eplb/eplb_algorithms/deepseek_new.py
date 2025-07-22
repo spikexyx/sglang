@@ -13,7 +13,7 @@ def rebalance_experts_with_affinity(
     comm_penalty: Optional[torch.Tensor] = None,
 ):
     global _REBALANCE_CALL_COUNT
-    if _REBALANCE_CALL_COUNT < 2:
+    if _REBALANCE_CALL_COUNT < 3:
         _REBALANCE_CALL_COUNT += 1
     # _REBALANCE_CALL_COUNT += 1
 
@@ -113,7 +113,7 @@ def rebalance_experts_with_affinity(
             # masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
 
             # calculate move penalty
-            if comm_penalty is not None and _REBALANCE_CALL_COUNT >= 2:
+            if comm_penalty is not None and _REBALANCE_CALL_COUNT >= 3:
                 gpu_ids = torch.arange(num_gpus, device=weight.device).unsqueeze(0)
                 # next_slots = gpu_ids * num_local_physical_experts + gpu_ep_counts
                 next_slots = gpu_ids * num_local_physical_experts
