@@ -115,7 +115,7 @@ def rebalance_experts_with_affinity(
                 logical_experts_expanded = current_logical_experts.unsqueeze(1).expand(-1, num_gpus)
                 layer_indices = torch.arange(num_layers, device=weight.device).unsqueeze(1).expand_as(logical_experts_expanded)
 
-                alpha = 0.5
+                alpha = 0.3
                 penalty_values = comm_penalty[layer_indices, logical_experts_expanded, next_slots]
                 penalty_factor = 1.0 + alpha * penalty_values
 
