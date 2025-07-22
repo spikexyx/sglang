@@ -71,7 +71,7 @@ class EPLBManager:
 
         penalty = torch.zeros((num_layers, num_log_ep, num_phy_ep), dtype=torch.float32)
 
-        expert_gpu = torch.arrange(num_phy_ep) // num_phy_ep_per_gpu
+        expert_gpu = torch.arange(num_phy_ep) // num_phy_ep_per_gpu
         expert_node = expert_gpu // gpus_per_node
 
         for l in range(num_layers):
