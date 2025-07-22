@@ -172,7 +172,7 @@ class ServerArgs:
     deepep_config: Optional[str] = None
     moe_dense_tp_size: Optional[int] = None
     eplb_intra_node_penalty: float = 1.0
-    eplb_inter_node_penalty: float = 2.0
+    eplb_inter_node_penalty: float = 3.0
 
     # Double Sparsity
     enable_double_sparsity: bool = False
