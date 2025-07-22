@@ -108,14 +108,15 @@ def rebalance_experts_with_affinity(
             # calculate move penalty
             if comm_penalty is not None:
                 gpu_ids = torch.arange(num_gpus, device=weight.device).unsqueeze(0)
-                next_slots = gpu_ids * num_local_physical_experts + gpu_ep_counts
+                # next_slots = gpu_ids * num_local_physical_experts + gpu_ep_counts
+                next_slots = gpu_ids * num_local_physical_experts
 
-                next_slots = torch.clamp(next_slots, 0, num_physical_experts - 1)
+                # next_slots = torch.clamp(next_slots, 0, num_physical_experts - 1)
 
                 logical_experts_expanded = current_logical_experts.unsqueeze(1).expand(-1, num_gpus)
                 layer_indices = torch.arange(num_layers, device=weight.device).unsqueeze(1).expand_as(logical_experts_expanded)
 
-                alpha = 0.3
+                alpha = 0.2
                 penalty_values = comm_penalty[layer_indices, logical_experts_expanded, next_slots]
                 penalty_factor = 1.0 + alpha * penalty_values
 
