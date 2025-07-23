@@ -28,12 +28,7 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.utils import get_bool_env_var
 
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+
 
 _LOG_INPUT = get_bool_env_var("SGLANG_EXPERT_LOCATION_UPDATER_LOG_INPUT")
 
