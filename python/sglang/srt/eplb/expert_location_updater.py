@@ -129,6 +129,14 @@ def _update_expert_weights_raw(
 ):
     log_metrics = get_bool_env_var("SGLANG_EXPERT_LOCATION_UPDATER_LOG_METRICS")
 
+    total_comm_stats = {
+        'unchanged': 0,
+        'same_gpu': 0,
+        'free_rider': 0,
+        'same_node': 0,
+        'cross_node': 0,
+    }
+
     temp_buffers = create_temp_buffers(
         routed_experts_weights_of_layer[update_layer_ids[0]]
     )
@@ -138,7 +146,7 @@ def _update_expert_weights_raw(
     num_gpu_per_node = world_size // nnodes
 
     for layer_id in update_layer_ids:
-        update_expert_weights_single_layer(
+        output_logs, comm_stats = update_expert_weights_single_layer(
             routed_experts_weights=routed_experts_weights_of_layer[layer_id],
             temp_buffers=temp_buffers,
             old_physical_to_logical_map=old_expert_location_metadata.physical_to_logical_map_cpu[
@@ -153,6 +161,43 @@ def _update_expert_weights_raw(
             world_size=world_size,
             log_metrics=log_metrics,
         )
+        total_comm_stats['cross_node'] += comm_stats['cross_node']
+        total_comm_stats['same_node'] += comm_stats['same_node']
+        total_comm_stats['same_gpu'] += comm_stats['same_gpu']
+        total_comm_stats['free_rider'] += comm_stats['free_rider']
+        total_comm_stats['unchanged'] += comm_stats['unchanged']
+
+    # 打印统计信息
+    print(f"\n{'='*50}")
+    print(f"🎯 专家权重更新统计 (Rank {rank})")
+    print(f"{'='*50}")
+    print(f"📋 处理层数: {len(update_layer_ids)} 层")
+    print(f"📊 处理情况统计:")
+    print(f"  - 未变更 (unchanged): {total_comm_stats['unchanged']} 次")
+    print(f"  - 同GPU内复制 (same-gpu): {total_comm_stats['same_gpu']} 次") 
+    print(f"  - 免费搭车 (free-rider): {total_comm_stats['free_rider']} 次")
+    print(f"  - 同节点通讯 (same-node): {total_comm_stats['same_node']} 次")
+    print(f"  - 跨节点通讯 (cross-node): {total_comm_stats['cross_node']} 次")
+    
+    # 计算总通讯次数和占比
+    total_network_comm = total_comm_stats['same_node'] + total_comm_stats['cross_node']
+    total_all_operations = sum(total_comm_stats.values())
+    
+    print(f"\n📈 汇总分析:")
+    print(f"  - 总操作次数: {total_all_operations}")
+    print(f"  - 网络通讯次数: {total_network_comm}")
+    
+    if total_network_comm > 0:
+        same_node_ratio = total_comm_stats['same_node'] / total_network_comm * 100
+        cross_node_ratio = total_comm_stats['cross_node'] / total_network_comm * 100
+        print(f"  - 同节点通讯占比: {same_node_ratio:.1f}%")
+        print(f"  - 跨节点通讯占比: {cross_node_ratio:.1f}%")
+    
+    if total_all_operations > 0:
+        network_ratio = total_network_comm / total_all_operations * 100
+        print(f"  - 需要网络通讯的操作占比: {network_ratio:.1f}%")
+    
+    print(f"{'='*50}")
 
 
 def create_temp_buffers(sample_tensors):
@@ -192,6 +237,14 @@ def update_expert_weights_single_layer(
         )
 
     output_logs = [] if debug else None
+
+    comm_stats = {
+        'unchanged': 0,
+        'same_gpu': 0,
+        'free_rider': 0,
+        'same_node': 0,
+        'cross_node': 0,
+    }
 
     num_physical_experts = len(old_physical_to_logical_map)
     num_tensors = len(routed_experts_weights)
@@ -239,6 +292,7 @@ def update_expert_weights_single_layer(
 
         # case 1: unchanged
         if old_physical_to_logical_map[dst_expert_location] == logical_expert_id:
+            comm_stats['unchanged'] += 1
             if debug:
                 output_logs.append(
                     f"handle_recv_of_dst_expert_location {dst_expert_location=} case=unchanged"
@@ -255,6 +309,7 @@ def update_expert_weights_single_layer(
                 buffer2weight_copy_infos.append(
                     (dst_expert_location, dst_expert_location)
                 )
+                comm_stats['same_gpu'] += 1
                 if debug:
                     output_logs.append(
                         f"handle_recv_of_dst_expert_location {dst_expert_location=} case=same-gpu {src_expert_location=}"
@@ -269,6 +324,7 @@ def update_expert_weights_single_layer(
                 buffer2weight_copy_infos.append(
                     (src_expert_location, dst_expert_location)
                 )
+                comm_stats['free_rider'] += 1
                 if debug:
                     output_logs.append(
                         f"handle_recv_of_dst_expert_location {dst_expert_location=} case=free-rider {src_expert_location=}"
@@ -291,6 +347,7 @@ def update_expert_weights_single_layer(
                 logical_expert_id=logical_expert_id,
                 dst_expert_location=dst_expert_location,
             )
+            comm_stats['same_node'] += 1
             if debug:
                 output_logs.append(
                     f"handle_recv_of_dst_expert_location {dst_expert_location=} case=same-node {chosen_src_rank=}"
@@ -309,6 +366,7 @@ def update_expert_weights_single_layer(
             logical_expert_id=logical_expert_id,
             dst_expert_location=dst_expert_location,
         )
+        comm_stats['cross_node'] += 1
         if debug:
             output_logs.append(
                 f"handle_recv_of_dst_expert_location {dst_expert_location=} case=cross-node {chosen_src_rank=}"
@@ -465,7 +523,7 @@ def update_expert_weights_single_layer(
 
     _entrypoint()
 
-    return output_logs
+    return output_logs, comm_stats
 
 
 class _ChunkUtils:
