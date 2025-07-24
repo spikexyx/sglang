@@ -32,6 +32,7 @@ class EPLBManager:
             self._server_args.eplb_rebalance_layers_per_chunk
         )
         self._rebalance_num_iterations = self._server_args.eplb_rebalance_num_iterations
+        # Used for deepseek_comm algorithm
         self._old_experts_metadata = None
         self._comm_penalty = None
 
@@ -102,8 +103,8 @@ class EPLBManager:
         in_node_set = in_node_set.any(dim=2)                    # (L, X, Y)
 
         penalty = torch.zeros((L, X, Y), dtype=torch.float32, device=old_log2phy.device)
-        penalty[~in_gpu_set & ~in_node_set] = self._server_args.eplb_inter_node_penalty   # cross node
-        penalty[~in_gpu_set &  in_node_set] = self._server_args.eplb_intra_node_penalty  # same node cross gpu
+        penalty[~in_gpu_set & ~in_node_set] = self._server_args.eplb_inter_node_penalty   # cross-node
+        penalty[~in_gpu_set &  in_node_set] = self._server_args.eplb_intra_node_penalty  # same-node cross-gpu
 
         self._comm_penalty = penalty.cpu()
         logger.info("[EPLBManager] post rebalance handler end")
