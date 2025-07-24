@@ -161,14 +161,14 @@ class EPLBManager:
             msg += f" = {time_middle_2 - time_middle:.3f}s"
         logger.info(msg)
 
-        self._old_experts_metadata = expert_location_metadata
-
-        thread = threading.Thread(
-            target=self._post_rebalance_handler,
-            args=(),
-            daemon=True,
-        )
-        thread.start()
+        if self._server_args.eplb_algorithm == "deepseek_comm":
+            self._old_experts_metadata = expert_location_metadata
+            thread = threading.Thread(
+                target=self._post_rebalance_handler,
+                args=(),
+                daemon=True,
+            )
+            thread.start()
 
         msg = f"[EPLBManager] rebalance end"
         if enable_timing:
