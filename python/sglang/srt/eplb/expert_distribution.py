@@ -856,6 +856,7 @@ class _SlidingWindowAccumulator(_UtilizationRateAccumulatorMixin):
             dtype=torch.int32,
             device=self._server_args.device,
         )
+
     def append(
         self,
         forward_pass_id: int,
@@ -867,9 +868,11 @@ class _SlidingWindowAccumulator(_UtilizationRateAccumulatorMixin):
         self._global_physical_count_of_buffered_step.append(
             single_pass_data["global_physical_count"]
         )
+
     def reset(self):
         super().reset()
         self._global_physical_count_of_buffered_step.reset()
+        
     def dump(self, output_mode: _OutputMode):
         if self._server_args.expert_distribution_recorder_mode in ["historical_stat", "historical_dynamic"]:
             if self._server_args.eplb_window_decay_mode == "exp":
