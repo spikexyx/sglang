@@ -32,7 +32,7 @@ from sglang.srt.utils import Withable, get_bool_env_var
 
 logger = logging.getLogger(__name__)
 
-# 添加控制台 方便调试输出
+# Add logger handler for debug
 if not logger.handlers:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
@@ -838,13 +838,13 @@ class _SlidingWindowAccumulator(_UtilizationRateAccumulatorMixin):
         self._window_size = self._server_args.eplb_window_size
         self._priority_window_size = self._server_args.eplb_priority_window_size
         self._current_window_size = self._server_args.eplb_rebalance_num_iterations
-        # 根据recorder mode选择不同的window size
+        # Choose window size according to different recorder mode
         if self._server_args.expert_distribution_recorder_mode == "historical":
             buffer_window_size = self._window_size
         elif self._server_args.expert_distribution_recorder_mode in ["historical_stat", "historical_dynamic"]:
             buffer_window_size = self._current_window_size
         else:
-            # 默认使用window_size
+            # Default window_size
             buffer_window_size = self._window_size
         self._global_physical_count_of_buffered_step = _Buffer.init_new_historical(
             item_shape=(
@@ -871,7 +871,6 @@ class _SlidingWindowAccumulator(_UtilizationRateAccumulatorMixin):
         super().reset()
         self._global_physical_count_of_buffered_step.reset()
     def dump(self, output_mode: _OutputMode):
-        # 根据recorder mode选择不同的转换函数
         if self._server_args.expert_distribution_recorder_mode in ["historical_stat", "historical_dynamic"]:
             if self._server_args.eplb_window_decay_mode == "exp":
                 cur_decay_mode = 0
@@ -889,7 +888,6 @@ class _SlidingWindowAccumulator(_UtilizationRateAccumulatorMixin):
                 physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map,
             )
         else:
-            # 默认使用historical
             logical_count_of_buffered_step = _convert_global_physical_count_to_logical_count_historical(
                 self._global_physical_count_of_buffered_step.get_all(),
                 num_layers=self._expert_location_metadata.num_layers,
@@ -998,32 +996,28 @@ class _InfiniteBuffer(_Buffer):
 
 class _DequeBuffer(_Buffer):
     def __init__(self, item_shape: Tuple, buffer_size: int, dtype, device):
-        # 使用deque作为基础数据结构,实现FIFO
+        # Use deque, FIFO
         self._buffer_size = buffer_size
         self._device = device
         self._dtype = dtype
         self._item_shape = item_shape
-        # 初始化一个空的deque
         self._deque = deque(maxlen=buffer_size)
     def append(self, value: torch.Tensor):
-        # 如果deque达到最大长度,会自动从左侧(最早的数据)移除
         self._deque.append(value.clone())
     def get_all(self) -> torch.Tensor:
-        if not self._deque: # 如果deque为空
+        if not self._deque:
             return torch.zeros((self._buffer_size, *self._item_shape), 
                             dtype=self._dtype, device=self._device)
         
-        # 将deque中的所有tensor堆叠成一个tensor
         tensor_list = list(self._deque)
         actual_size = len(tensor_list)
         
-        # 如果deque还未填满,需要填充零tensor
         result = torch.zeros((self._buffer_size, *self._item_shape), 
                            dtype=self._dtype, device=self._device)
         result[-actual_size:] = torch.stack(tensor_list)
         return result
     def reset(self):
-        # self._deque.clear() # 清空deque
+        # self._deque.clear()
         pass
 
 def _convert_global_physical_count_to_logical_count(
@@ -1127,35 +1121,28 @@ def _convert_global_physical_count_to_logical_count_historical_stat(
     dtype = global_physical_count.dtype
     device = global_physical_count.device
     
-    # 设置衰减参数
-    alpha = 0.98  # 指数衰减因子
+    # Decay factor
+    alpha = 0.98
     
     if decay_mode == 0:
-        # 反向指数衰减：最新的数据权重为1，往前依次为alpha^1, alpha^2, ...
         weights = torch.tensor(
             [alpha ** i for i in range(dim_extra)][::-1],
             dtype=torch.float32,
             device=device
         )
     elif decay_mode == 1:
-        # 线性衰减：权重从1线性递减到0
         weights = torch.linspace(0, 1, dim_extra, dtype=torch.float32, device=device)
     elif decay_mode == 2:
-        # 无衰减：所有权重都是1
         weights = torch.ones(dim_extra, dtype=torch.float32, device=device)
     else:
         raise ValueError(f"Unsupported decay mode: {decay_mode}")
     
-    # 归一化权重
-    weights = weights / weights.max()  # 确保最新的数据权重为1
+    weights = weights / weights.max()
     
-    # 将权重转换为与输入tensor相同的dtype
     weights = weights.to(dtype)
     
-    # 应用权重到输入张量
     weighted_physical_count = global_physical_count * weights.view(-1, 1, 1)
     
-    # 转换为逻辑专家计数
     logical_count_historical = torch.zeros(
         (dim_extra, num_layers, num_logical_experts), 
         dtype=dtype, 
