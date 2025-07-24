@@ -138,9 +138,6 @@ class ExpertLocationMetadata:
         num_groups = model_config_for_expert_location.num_groups
         num_nodes = server_args.nnodes
 
-        intra_node_penalty_factor = server_args.eplb_intra_node_penalty
-        inter_node_penalty_factor = server_args.eplb_inter_node_penalty
-
         physical_to_logical_map, logical_to_all_physical_map, expert_count = (
             eplb_algorithms.rebalance_experts(
                 tokens_per_expert=logical_count,
