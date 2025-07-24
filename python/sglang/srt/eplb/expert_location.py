@@ -153,8 +153,6 @@ class ExpertLocationMetadata:
                     num_groups=num_groups,
                     num_nodes=num_nodes,
                 ),
-                intra_node_penalty_factor=intra_node_penalty_factor,
-                inter_node_penalty_factor=inter_node_penalty_factor,
                 comm_penalty=comm_penalty
             )
         )
