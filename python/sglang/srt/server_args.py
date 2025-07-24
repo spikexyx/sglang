@@ -1682,6 +1682,7 @@ class ServerArgs:
             type=float,
             default=ServerArgs.eplb_rebalance_threshold,
             help="Balancedness threshold for triggering EPLB re-balance in sliding window mode.",
+        )
         parser.add_argument(
             "--weight-loader-disable-mmap",
             action="store_true",
