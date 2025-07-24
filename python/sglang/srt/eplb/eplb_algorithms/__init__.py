@@ -3,7 +3,7 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec, deepseek_comm, deepseek_comm_vec, deepseek_new
+from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec, deepseek_comm
 
 
 class EplbAlgorithm(Enum):
@@ -13,8 +13,6 @@ class EplbAlgorithm(Enum):
     deepseek_vec_hierarchical = auto()
     # TODO may have more algorithm later
     deepseek_comm = auto()
-    deepseek_comm_vec = auto()
-    deepseek_new = auto()
 
 
 def rebalance_experts(
@@ -24,8 +22,6 @@ def rebalance_experts(
     num_groups: Optional[int],
     num_nodes: int,
     algorithm: EplbAlgorithm,
-    intra_node_penalty_factor: float,
-    inter_node_penalty_factor: float,
     comm_penalty: Optional[torch.Tensor] = None,
 ):
     if algorithm in [EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical]:
@@ -51,37 +47,8 @@ def rebalance_experts(
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_vec_hierarchical,
         )
     
-    if algorithm in [
-        EplbAlgorithm.deepseek_comm,
-    ]:
+    if algorithm in [EplbAlgorithm.deepseek_comm]:
         return deepseek_comm.rebalance_experts(
-            weight=tokens_per_expert.sum(dim=0),
-            num_replicas=num_physical_experts,
-            num_groups=num_groups,
-            num_nodes=num_nodes,
-            num_gpus=num_physical_experts // num_local_physical_experts,
-            intra_node_penalty_factor = intra_node_penalty_factor,
-            inter_node_penalty_factor = inter_node_penalty_factor
-        )
-    
-    if algorithm in [
-        EplbAlgorithm.deepseek_comm_vec,
-    ]:
-        return deepseek_comm_vec.rebalance_experts(
-            tokens_per_expert=tokens_per_expert,
-            num_physical_experts=num_physical_experts,
-            num_local_physical_experts=num_local_physical_experts,
-            num_groups=num_groups,
-            num_nodes=num_nodes,
-            num_gpus=num_physical_experts // num_local_physical_experts,
-            intra_node_penalty = intra_node_penalty_factor,
-            inter_node_penalty = inter_node_penalty_factor
-        )
-    
-    if algorithm in [
-        EplbAlgorithm.deepseek_new,
-    ]:
-        return deepseek_new.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_physical_experts=num_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
