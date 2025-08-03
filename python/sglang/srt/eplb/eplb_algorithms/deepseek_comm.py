@@ -55,12 +55,12 @@ def rebalance_experts_with_affinity(
     weight_all_diff = weight + arange_num_logical_experts * 1e-4
     for i in range(num_redundancy_experts):
         score = weight_all_diff / logical_count
-        score1 = weight / (logical_count + 1)
+        # score1 = weight / (logical_count + 1)
         
-        score1 = score1.view_as(score)
+        # score1 = score1.view_as(score)
         values, indices = score.max(-1, keepdim=True)
         values = values.expand_as(score).contiguous()
-        score.scatter_(-1, indices, score1.gather(-1, indices))
+        # score.scatter_(-1, indices, score1.gather(-1, indices))
         values.scatter_(-1, indices, score.max(-1, keepdim=True).values)
         redundancy_indices = values.argmin(-1)
         physical_to_logical_map[:, num_logical_experts + i] = redundancy_indices
@@ -83,6 +83,38 @@ def rebalance_experts_with_affinity(
             arange_num_moe_layers,
             redundancy_indices,
         ] += 1
+
+    # weight_all_diff = weight + arange_num_logical_experts * 1e-4
+    # for i in range(num_redundancy_experts):
+    #     score = weight_all_diff / logical_count
+    #     score1 = weight / (logical_count + 1)
+        
+    #     score1 = score1.view_as(score)
+    #     values, indices = score.max(-1, keepdim=True)
+    #     values = values.expand_as(score).contiguous()
+    #     score.scatter_(-1, indices, score1.gather(-1, indices))
+    #     values.scatter_(-1, indices, score.max(-1, keepdim=True).values)
+    #     redundancy_indices = values.argmin(-1)
+    #     physical_to_logical_map[:, num_logical_experts + i] = redundancy_indices
+    #     redundancy_count = (
+    #         logical_count.gather(-1, redundancy_indices.view(num_layers, 1)).squeeze(1)
+    #     )
+        
+    #     physical_redundancy_indices = torch.full(
+    #         (num_layers,),
+    #         num_logical_experts + i,
+    #         dtype=torch.int,
+    #         device=weight.device
+    #     )
+    #     logical_to_physical_map[
+    #         arange_num_moe_layers,
+    #         redundancy_indices,
+    #         redundancy_count,
+    #     ] = physical_redundancy_indices
+    #     logical_count[
+    #         arange_num_moe_layers,
+    #         redundancy_indices,
+    #     ] += 1
 
     # Load-balance between devices
     if num_gpus > 1:
