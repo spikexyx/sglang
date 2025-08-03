@@ -273,65 +273,65 @@ def rebalance_experts_with_affinity_new(
 
     # Load-balance between devices
     if num_gpus > 1:
-        if comm_penalty is not None:
-            comm_penalty = comm_penalty.to(weight.device)
-
         physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
         counts = logical_count.gather(-1, physical_to_logical_map_int64)
         score = weight.gather(-1, physical_to_logical_map_int64)
-        score = score / counts
+        normalized_score = score / counts  # 归一化分数
         
-        sorted_scores, sorted_indices = score.sort(-1, descending=True)
-
-        gpu_loads = torch.ones(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
-        gpu_ep_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
-
-        # balanced_indices = torch.full_like(score, -1, dtype=torch.long, device=weight.device)
+        # 按分数降序排序
+        sorted_scores, sorted_indices = normalized_score.sort(-1, descending=True)
+        
+        # 初始化GPU状态
+        gpu_expert_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
+        gpu_total_scores = torch.zeros(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
+        
         sorted_expert_final_pos = torch.full_like(sorted_indices, -1)
 
         for i in range(num_physical_experts):
-            expert_score = sorted_scores[:, i]
             expert_idx = sorted_indices[:, i]
-
+            expert_score = sorted_scores[:, i]
+            
+            # 获取当前专家的逻辑ID
             current_logical_experts = physical_to_logical_map.gather(-1, expert_idx.unsqueeze(1)).squeeze(1)
             
-            masked_gpu_loads = gpu_loads.clone()
-            # full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
-            # masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
-
-            # calculate move penalty
+            # 计算每个GPU的选择分数
+            # 1. 基础分数：优先选择专家数量少的GPU
+            base_score = gpu_expert_counts.float()
+            
+            # 2. 负载分数：考虑当前负载
+            load_score = gpu_total_scores / (gpu_expert_counts + 1e-6)
+            
+            # 3. 通信惩罚（如果提供）
             if comm_penalty is not None and _REBALANCE_CALL_COUNT >= 3:
                 gpu_ids = torch.arange(num_gpus, device=weight.device).unsqueeze(0)
-                # next_slots = gpu_ids * num_local_physical_experts + gpu_ep_counts
-                next_slots = gpu_ids * num_local_physical_experts
-
-                # next_slots = torch.clamp(next_slots, 0, num_physical_experts - 1)
-
+                next_slots = gpu_ids * num_local_physical_experts + gpu_expert_counts
+                
                 logical_experts_expanded = current_logical_experts.unsqueeze(1).expand(-1, num_gpus)
                 layer_indices = torch.arange(num_layers, device=weight.device).unsqueeze(1).expand_as(logical_experts_expanded)
-
-                # alpha = 1.0
-                penalty_values = comm_penalty[layer_indices, logical_experts_expanded, next_slots]
-                # penalty_factor = 1.0 + alpha * penalty_values
-                # penalty_factor = 1.0 + penalty_values
-                penalty_factor = penalty_values
-
-                # masked_gpu_loads = masked_gpu_loads + 1.0
-                masked_gpu_loads = penalty_factor * masked_gpu_loads
-
-            full_gpus_mask = (gpu_ep_counts >= num_local_physical_experts)
-            masked_gpu_loads[full_gpus_mask] = torch.finfo(score.dtype).max
-
-            target_gpu = masked_gpu_loads.argmin(dim=1)
-            slot_on_gpu = gpu_ep_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
-
+                
+                penalty_values = comm_penalty[layer_indices, logical_experts_expanded, next_slots.clamp(0, num_physical_experts-1)]
+                comm_score = penalty_values * comm_penalty_weight
+            else:
+                comm_score = 0
+            
+            # 综合分数：专家数量是主要因素，负载和通信惩罚是次要因素
+            combined_score = base_score + 0.1 * load_score + comm_score
+            
+            # 屏蔽已满的GPU
+            full_gpus_mask = (gpu_expert_counts >= num_local_physical_experts)
+            combined_score[full_gpus_mask] = torch.finfo(score.dtype).max
+            
+            # 选择分数最低的GPU
+            target_gpu = combined_score.argmin(dim=1)
+            slot_on_gpu = gpu_expert_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
+            
             final_pos = target_gpu * num_local_physical_experts + slot_on_gpu
-
             sorted_expert_final_pos[:, i] = final_pos
-
-            gpu_loads.scatter_add_(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
-            gpu_ep_counts.scatter_add_(1, target_gpu.unsqueeze(1), torch.ones_like(target_gpu.unsqueeze(1)))
-
+            
+            # 更新GPU状态
+            gpu_expert_counts.scatter_add_(1, target_gpu.unsqueeze(1), torch.ones_like(target_gpu.unsqueeze(1)))
+            gpu_total_scores.scatter_add_(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
+            
         balanced_indices = torch.full_like(sorted_indices, -1)
         balanced_indices.scatter_(-1, sorted_expert_final_pos, sorted_indices)
 
