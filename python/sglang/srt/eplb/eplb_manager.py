@@ -35,6 +35,7 @@ class EPLBManager:
         # Used for deepseek_comm algorithm
         self._old_experts_metadata = None
         self._comm_penalty = None
+        self._comm_check = False
 
         # Otherwise, the circular buffer will contain stale data. If the case is needed, it can be implemented.
         assert (
@@ -169,7 +170,7 @@ class EPLBManager:
             msg += f" = {time_middle_2 - time_middle:.3f}s"
         logger.info(msg)
 
-        if self._server_args.eplb_algorithm == "deepseek_comm":
+        if self._comm_check and self._server_args.eplb_algorithm in ["deepseek_comm", "deepseek_new"]:
             self._old_experts_metadata = expert_location_metadata
             thread = threading.Thread(
                 target=self._post_rebalance_handler,
@@ -184,6 +185,8 @@ class EPLBManager:
             time_end = time.time()
             msg += f" time= {time_end - time_start:.3f}s"
         logger.info(msg)
+
+        self._comm_check = True
 
     def _compute_update_layer_ids_chunks(self) -> List[List[int]]:
         all_layer_ids = sorted(
