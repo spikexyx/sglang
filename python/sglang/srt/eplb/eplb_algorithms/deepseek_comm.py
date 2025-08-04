@@ -96,7 +96,7 @@ def rebalance_experts_with_affinity(
         
         sorted_scores, sorted_indices = score.sort(-1, descending=True)
 
-        gpu_loads = torch.ones(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
+        gpu_loads = torch.zeros(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
         gpu_ep_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
 
         # balanced_indices = torch.full_like(score, -1, dtype=torch.long, device=weight.device)
@@ -304,7 +304,7 @@ def rebalance_experts(
     comm_penalty: Optional[torch.Tensor] = None,
 ):
     weight = weight.float().cpu()
-    phy2log, log2phy, logcnt = rebalance_experts_with_affinity_new(
+    phy2log, log2phy, logcnt = rebalance_experts_with_affinity(
         weight, num_physical_experts, num_local_physical_experts, comm_penalty
     )
     return phy2log, log2phy, logcnt
