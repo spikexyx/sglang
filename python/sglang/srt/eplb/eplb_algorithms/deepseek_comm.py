@@ -52,38 +52,6 @@ def rebalance_experts_with_affinity(
     logical_to_physical_map[:, :, 0] = arange_num_logical_experts[None, :]
 
     # Replicate experts
-    # weight_all_diff = weight + arange_num_logical_experts * 1e-4
-    # for i in range(num_redundancy_experts):
-    #     score = weight_all_diff / logical_count
-    #     # score1 = weight / (logical_count + 1)
-        
-    #     # score1 = score1.view_as(score)
-    #     values, indices = score.max(-1, keepdim=True)
-    #     values = values.expand_as(score).contiguous()
-    #     # score.scatter_(-1, indices, score1.gather(-1, indices))
-    #     values.scatter_(-1, indices, score.max(-1, keepdim=True).values)
-    #     redundancy_indices = values.argmin(-1)
-    #     physical_to_logical_map[:, num_logical_experts + i] = redundancy_indices
-    #     redundancy_count = (
-    #         logical_count.gather(-1, redundancy_indices.view(num_layers, 1)).squeeze(1)
-    #     )
-        
-    #     physical_redundancy_indices = torch.full(
-    #         (num_layers,),
-    #         num_logical_experts + i,
-    #         dtype=torch.int,
-    #         device=weight.device
-    #     )
-    #     logical_to_physical_map[
-    #         arange_num_moe_layers,
-    #         redundancy_indices,
-    #         redundancy_count,
-    #     ] = physical_redundancy_indices
-    #     logical_count[
-    #         arange_num_moe_layers,
-    #         redundancy_indices,
-    #     ] += 1
-
     weight_all_diff = weight + arange_num_logical_experts * 1e-4
     for i in range(num_redundancy_experts):
         score = weight_all_diff / logical_count
@@ -273,78 +241,58 @@ def rebalance_experts_with_affinity_new(
 
     # Load-balance between devices
     if num_gpus > 1:
+        # 1. 计算每个物理专家的归一化分数 (与原版逻辑一致)
         physical_to_logical_map_int64 = physical_to_logical_map.to(torch.int64)
         counts = logical_count.gather(-1, physical_to_logical_map_int64)
-        score = weight.gather(-1, physical_to_logical_map_int64)
-        normalized_score = score / counts  # 归一化分数
-        
-        # 按分数降序排序
-        sorted_scores, sorted_indices = normalized_score.sort(-1, descending=True)
-        
-        # 初始化GPU状态
+        score_per_phy_expert = weight.gather(-1, physical_to_logical_map_int64) / counts
+
+        # 2. 按分数降序排序，准备贪心分配 (与原版逻辑一致)
+        sorted_scores, sorted_indices = score_per_phy_expert.sort(-1, descending=True)
+
+        # 3. 初始化GPU状态 (!!! 关键修正 !!!)
+        # gpu_loads 必须从 0 开始，这对应原版 balanced_packing 的 pack_weights
+        gpu_loads = torch.zeros(num_layers, num_gpus, dtype=score_per_phy_expert.dtype, device=weight.device)
         gpu_expert_counts = torch.zeros(num_layers, num_gpus, dtype=torch.long, device=weight.device)
-        gpu_total_scores = torch.zeros(num_layers, num_gpus, dtype=score.dtype, device=weight.device)
         
+        # 准备一个张量来记录排序后的专家最终被分配到的位置
         sorted_expert_final_pos = torch.full_like(sorted_indices, -1)
 
+        # 4. 迭代分配所有物理专家 (向量化的贪心循环)
         for i in range(num_physical_experts):
-            expert_idx = sorted_indices[:, i]
+            # a. 获取当前最重的专家及其分数
             expert_score = sorted_scores[:, i]
             
-            # 获取当前专家的逻辑ID
-            current_logical_experts = physical_to_logical_map.gather(-1, expert_idx.unsqueeze(1)).squeeze(1)
-            
-            # 计算每个GPU的选择分数
-            # 1. 基础分数：优先选择专家数量少的GPU
-            base_score = gpu_expert_counts.float()
-            
-            # 2. 负载分数：考虑当前负载
-            load_score = gpu_total_scores / (gpu_expert_counts + 1e-6)
-            
-            # 3. 通信惩罚（如果提供）
-            if comm_penalty is not None and _REBALANCE_CALL_COUNT >= 3:
-                gpu_ids = torch.arange(num_gpus, device=weight.device).unsqueeze(0)
-                next_slots = gpu_ids * num_local_physical_experts + gpu_expert_counts
-                
-                logical_experts_expanded = current_logical_experts.unsqueeze(1).expand(-1, num_gpus)
-                layer_indices = torch.arange(num_layers, device=weight.device).unsqueeze(1).expand_as(logical_experts_expanded)
-                
-                penalty_values = comm_penalty[layer_indices, logical_experts_expanded, next_slots.clamp(0, num_physical_experts-1)]
-                comm_score = penalty_values * comm_penalty_weight
-            else:
-                comm_score = 0
-            
-            # 综合分数：专家数量是主要因素，负载和通信惩罚是次要因素
-            combined_score = base_score + 0.1 * load_score + comm_score
-            
-            # 屏蔽已满的GPU
+            # b. 选择目标GPU：寻找当前总负载最小且未满的GPU
+            # 这是与原版 `min(..., key=pack_weights.__getitem__)` 等价的向量化操作
+            masked_gpu_loads = gpu_loads.clone()
             full_gpus_mask = (gpu_expert_counts >= num_local_physical_experts)
-            combined_score[full_gpus_mask] = torch.finfo(score.dtype).max
+            masked_gpu_loads[full_gpus_mask] = torch.finfo(score_per_phy_expert.dtype).max
             
-            # 选择分数最低的GPU
-            target_gpu = combined_score.argmin(dim=1)
+            target_gpu = masked_gpu_loads.argmin(dim=1)
+
+            # c. 计算新专家在目标GPU上的槽位
             slot_on_gpu = gpu_expert_counts.gather(1, target_gpu.unsqueeze(1)).squeeze(1)
-            
             final_pos = target_gpu * num_local_physical_experts + slot_on_gpu
             sorted_expert_final_pos[:, i] = final_pos
-            
-            # 更新GPU状态
+
+            # d. 更新GPU状态 (与原版逻辑一致)
+            gpu_loads.scatter_add_(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
             gpu_expert_counts.scatter_add_(1, target_gpu.unsqueeze(1), torch.ones_like(target_gpu.unsqueeze(1)))
-            gpu_total_scores.scatter_add_(1, target_gpu.unsqueeze(1), expert_score.unsqueeze(1))
-            
+
+        # 5. 根据计算出的最终位置，重新排列专家
         balanced_indices = torch.full_like(sorted_indices, -1)
+        # sorted_expert_final_pos 是目标位置，sorted_indices 是源专家
         balanced_indices.scatter_(-1, sorted_expert_final_pos, sorted_indices)
 
         physical_to_logical_map = physical_to_logical_map.gather(-1, balanced_indices)
 
+        # 6. 更新反向映射 logical_to_physical_map (这部分逻辑与你的原版一致，是正确的)
         mask = logical_to_physical_map == -1
         logical_to_physical_map[mask] = 0
-
         inverse_balanced_indices = balanced_indices.argsort(-1)
         logical_to_physical_map = inverse_balanced_indices.gather(
             -1, logical_to_physical_map.view(num_layers, -1).to(torch.int64)
         ).view_as(logical_to_physical_map).to(torch.int)
-        
         logical_to_physical_map[mask] = -1
 
     return physical_to_logical_map, logical_to_physical_map, logical_count
