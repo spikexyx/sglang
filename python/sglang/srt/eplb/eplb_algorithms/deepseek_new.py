@@ -199,7 +199,7 @@ def balanced_packing_vectorized_with_comm(
                 torch.arange(num_layers),  
                 logical_expert_ids,
                 :
-            ]
+            ].view(num_layers, num_packs, groups_per_pack)[:, :, 0]
 
             penalty_factor = 1.0 + current_penalties
             
