@@ -170,7 +170,7 @@ class EPLBManager:
             msg += f" = {time_middle_2 - time_middle:.3f}s"
         logger.info(msg)
 
-        if self._comm_check and self._server_args.eplb_algorithm in ["deepseek_comm", "deepseek_new"]:
+        if self._comm_check and self._server_args.eplb_algorithm in ["deepseek_comm", "deepseek_opt"]:
             self._old_experts_metadata = expert_location_metadata
             thread = threading.Thread(
                 target=self._post_rebalance_handler,
