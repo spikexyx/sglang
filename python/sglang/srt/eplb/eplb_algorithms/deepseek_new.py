@@ -50,62 +50,6 @@ def balanced_packing(
             pack_items[pack] += 1
     return pack_index, rank_in_pack
 
-def balanced_packing_vectorized_fallback(
-    weight: torch.Tensor, num_packs: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Pack n weighted objects to m packs, such that each bin contains exactly n/m objects and the weights of all packs
-    are as balanced as possible.
-    
-    This is a vectorized implementation of the original algorithm.
-
-    Parameters:
-        weight: [X, n], the weight of each item
-        num_packs: number of packs
-
-    Returns:
-        pack_index: [X, n], the pack index of each item
-        rank_in_pack: [X, n], the rank of the item in the pack
-    """
-    num_layers, num_groups = weight.shape
-    assert num_groups % num_packs == 0
-    groups_per_pack = num_groups // num_packs
-
-    if groups_per_pack == 1:
-        pack_index = torch.arange(
-            weight.size(-1), dtype=torch.int64, device=weight.device
-        ).expand(weight.shape)
-        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
-        return pack_index, rank_in_pack
-
-    indices = weight.float().sort(-1, descending=True).indices  # [X, n]
-    
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64)
-    rank_in_pack = torch.full_like(weight, fill_value=-1, dtype=torch.int64)
-    
-    for i in range(num_layers):
-        pack_weights = torch.zeros(num_packs, dtype=weight.dtype, device=weight.device)  # [num_packs]
-        pack_items = torch.zeros(num_packs, dtype=torch.int64, device=weight.device)     # [num_packs]
-        
-        sorted_groups = indices[i]
-    
-        for j in range(num_groups):
-            group = sorted_groups[j]
-            
-            available_mask = (pack_items < groups_per_pack)  # [num_packs]
-            
-            masked_pack_weights = torch.where(available_mask, pack_weights, torch.inf)
-            pack = torch.argmin(masked_pack_weights).item()
-            
-            rank_in_pack_current = pack_items[pack].item()
-            pack_index[i, group] = pack
-            rank_in_pack[i, group] = rank_in_pack_current
-            
-            pack_weights[pack] += weight[i, group]
-            pack_items[pack] += 1
-    
-    return pack_index, rank_in_pack
-
 def balanced_packing_vectorized(
     weight: torch.Tensor, num_packs: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
